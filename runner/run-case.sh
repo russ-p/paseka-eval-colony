@@ -45,28 +45,36 @@ ensure_nats
 ensure_runtime
 
 echo "creating task on trace ${trace}..."
-paseka task create \
-  --trace "${trace}" \
-  --title "${title}" \
-  --file "${task_body_file}" \
-  --bee "${bee}" \
-  --intent "${intent}" \
-  --review "${review}" \
-  --autorun \
-  -C "${EVAL_ROOT}"
+create_out="$(
+  paseka task create \
+    --trace "${trace}" \
+    --title "${title}" \
+    --file "${task_body_file}" \
+    --bee "${bee}" \
+    --intent "${intent}" \
+    --review "${review}" \
+    --autorun \
+    -C "${EVAL_ROOT}" 2>&1
+)"
+echo "${create_out}"
+task_id="$(echo "${create_out}" | awk '/^  task:/{print $2}')"
+if [[ -z "${task_id}" ]]; then
+  echo "failed to parse task id from paseka task create output" >&2
+  exit 1
+fi
 
 echo "waiting for terminal task status (timeout ${timeout_secs}s)..."
-task_status="$(wait_for_terminal_task "${trace}" "${timeout_secs}")" || {
-  task_status="timeout"
-}
+task_status="$(wait_for_terminal_task "${trace}" "${task_id}" "${timeout_secs}")" || true
 
 oracle_ok=false
 if [[ "${task_status}" == "completed" ]]; then
   if run_oracle "${case_id}" "${trace}"; then
     oracle_ok=true
   fi
+elif [[ "${task_status}" == "stuck_running" || "${task_status}" == "timeout" ]]; then
+  echo "task did not reach terminal status in time (status=${task_status})" >&2
 else
-  echo "task did not complete successfully (status=${task_status})" >&2
+  echo "task finished with status=${task_status}" >&2
 fi
 
 replay_out="$(collect_replay_lines "${trace}")"
@@ -76,24 +84,40 @@ duration=$(( wall_end - wall_start ))
 mkdir -p "${REPORTS_DIR}"
 report_file="${REPORTS_DIR}/${case_id}-$(date -u +%Y%m%dT%H%M%SZ).json"
 
-python3 - "${report_file}" <<PY
+passed=$([[ "${task_status}" == "completed" && "${oracle_ok}" == true ]] && echo true || echo false)
+
+REPORT_CASE_ID="${case_id}" \
+REPORT_TRACE="${trace}" \
+REPORT_TASK_ID="${task_id}" \
+REPORT_SEED_SHA="${EVAL_META_DIR}/seed-sha" \
+REPORT_STARTED_AT="${started_at}" \
+REPORT_DURATION="${duration}" \
+REPORT_TASK_STATUS="${task_status}" \
+REPORT_TESTS_PASSED="${oracle_ok}" \
+REPORT_PASSED="${passed}" \
+REPORT_REPLAY="${replay_out}" \
+python3 - "${report_file}" <<'PY'
 import json
+import os
 import pathlib
 import sys
 
 report_path = pathlib.Path(sys.argv[1])
-replay = """${replay_out}"""
-passed = ${oracle_ok} and "${task_status}" == "completed"
+replay = os.environ.get("REPORT_REPLAY", "")
+
+def as_bool(name: str) -> bool:
+    return os.environ.get(name, "false").lower() == "true"
 
 report = {
-    "case_id": "${case_id}",
-    "trace": "${trace}",
-    "seed_sha": pathlib.Path("${EVAL_META_DIR}/seed-sha").read_text().strip(),
-    "started_at": "${started_at}",
-    "duration_sec": ${duration},
-    "task_status": "${task_status}",
-    "tests_passed": ${oracle_ok},
-    "passed": passed,
+    "case_id": os.environ["REPORT_CASE_ID"],
+    "trace": os.environ["REPORT_TRACE"],
+    "task_id": os.environ["REPORT_TASK_ID"],
+    "seed_sha": pathlib.Path(os.environ["REPORT_SEED_SHA"]).read_text().strip(),
+    "started_at": os.environ["REPORT_STARTED_AT"],
+    "duration_sec": int(os.environ["REPORT_DURATION"]),
+    "task_status": os.environ["REPORT_TASK_STATUS"],
+    "tests_passed": as_bool("REPORT_TESTS_PASSED"),
+    "passed": as_bool("REPORT_PASSED"),
     "replay": [line for line in replay.splitlines() if line.strip()],
 }
 report_path.write_text(json.dumps(report, indent=2) + "\n")

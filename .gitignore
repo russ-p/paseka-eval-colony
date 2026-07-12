@@ -7,8 +7,3 @@
 # Eval runner state and reports
 .eval/
 reports/
-
-# Materialized case workspace (seed copies to repo root)
-/pkg/
-/go.mod
-/go.sum

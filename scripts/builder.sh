@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Scripted eval builder: apply broken fix on first run, expect/ fix on rework.
+# Scripted eval builder: apply broken tree on first run, expect/ fix on rework.
 set -euo pipefail
 
 root="${PASEKA_COLONY_ROOT:?missing PASEKA_COLONY_ROOT}"
@@ -22,13 +22,16 @@ echo "${runs}" > "${runs_file}"
 cd "${workspace}"
 
 if [[ "${runs}" -eq 1 ]]; then
-  broken="${case_dir}/broken/bad.patch"
-  if [[ ! -f "${broken}" ]]; then
-    echo "eval builder: missing broken patch ${broken}" >&2
+  if [[ -d "${case_dir}/broken/pkg" ]]; then
+    rsync -a "${case_dir}/broken/pkg/" "${workspace}/pkg/"
+    echo "eval builder: applied broken/ tree (run ${runs})"
+  elif [[ -f "${case_dir}/broken/bad.patch" ]]; then
+    patch -p1 < "${case_dir}/broken/bad.patch"
+    echo "eval builder: applied broken patch (run ${runs})"
+  else
+    echo "eval builder: no broken fixture for run ${runs}" >&2
     exit 1
   fi
-  patch -p1 < "${broken}"
-  echo "eval builder: applied broken patch (run ${runs})"
 else
   if [[ -d "${case_dir}/expect" ]]; then
     rsync -a "${case_dir}/expect/" "${workspace}/"

@@ -129,7 +129,10 @@ materialize_seed() {
 reset_case() {
   local case_id="$1"
   require_case "$case_id"
+  local trace_id
+  trace_id="$(read_case_field "$case_id" trace)"
   purge_colony
+  clear_trace_ledger "${trace_id}"
   materialize_seed "$case_id"
   echo "reset case ${case_id} at seed $(cat "${EVAL_META_DIR}/seed-sha")"
 }
@@ -159,15 +162,9 @@ runtime_pid_file() {
 
 ensure_runtime() {
   mkdir -p "${EVAL_META_DIR}"
+  stop_runtime
   local pid_file
   pid_file="$(runtime_pid_file)"
-  if [[ -f "${pid_file}" ]]; then
-    local pid
-    pid="$(cat "${pid_file}")"
-    if kill -0 "${pid}" >/dev/null 2>&1; then
-      return 0
-    fi
-  fi
   echo "starting paseka run..."
   (cd "${EVAL_ROOT}" && nohup paseka run -C "${EVAL_ROOT}" > "${EVAL_META_DIR}/paseka-run.log" 2>&1 & echo $! > "${pid_file}")
   sleep 2
@@ -188,18 +185,34 @@ stop_runtime() {
 
 wait_for_terminal_task() {
   local trace_id="$1"
-  local timeout_secs="$2"
-  local start now status
+  local task_id="$2"
+  local timeout_secs="$3"
+  local start now status last_status unchanged_since
   start=$(date +%s)
+  unchanged_since="${start}"
+  last_status=""
   while true; do
     status="$(
       paseka task list --trace "${trace_id}" -C "${EVAL_ROOT}" 2>/dev/null \
-        | awk 'NR>1 && $1 != "TASK" && $1 != "" { print $2; exit }'
+        | awk -v id="${task_id}" '$1 == id { print $2; found=1 } END { if (!found) print "" }'
     )"
+    if [[ -z "${status}" ]]; then
+      status="missing"
+    fi
+    if [[ "${status}" != "${last_status}" ]]; then
+      last_status="${status}"
+      unchanged_since=$(date +%s)
+    fi
     case "${status}" in
       completed|failed|blocked|waiting_review)
         echo "${status}"
         return 0
+        ;;
+      running)
+        if (( $(date +%s) - unchanged_since >= 120 )); then
+          echo "stuck_running"
+          return 1
+        fi
         ;;
     esac
     now=$(date +%s)
@@ -209,6 +222,14 @@ wait_for_terminal_task() {
     fi
     sleep 2
   done
+}
+
+clear_trace_ledger() {
+  local trace_id="$1"
+  local bucket="paseka_paseka_eval_colony_task_ledger"
+  if command -v nats >/dev/null 2>&1; then
+    nats kv del "${bucket}" "${trace_id}" >/dev/null 2>&1 || true
+  fi
 }
 
 worktree_for_trace() {

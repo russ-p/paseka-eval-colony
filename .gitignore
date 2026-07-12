@@ -1,0 +1,14 @@
+# Paseka ephemeral colony state (also listed in .paseka/.gitignore)
+.paseka/worktrees/
+.paseka/runs/
+.paseka/*.local.yaml
+.paseka/cache/
+
+# Eval runner state and reports
+.eval/
+reports/
+
+# Materialized case workspace (seed copies to repo root)
+/pkg/
+/go.mod
+/go.sum

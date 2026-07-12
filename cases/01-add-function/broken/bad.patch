@@ -1,0 +1,12 @@
+diff --git a/pkg/calc/calc.go b/pkg/calc/calc.go
+index 1111111..2222222 100644
+--- a/pkg/calc/calc.go
++++ b/pkg/calc/calc.go
+@@ -1,6 +1,6 @@
+ package calc
+ 
+ // Sum returns a + b. Stub for eval seed — builder must implement.
+ func Sum(a, b int) int {
+-	return 0
++	return a + b + 1
+ }

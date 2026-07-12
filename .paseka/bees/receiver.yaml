@@ -1,0 +1,12 @@
+role: receiver
+adapter: script
+command: ./scripts/receiver.sh
+run_summary: disabled
+worktree: true
+subscribes:
+  - type: VERIFICATION
+    kind: verification.success
+    dispatch: direct
+publishes:
+  - type: VERIFICATION
+    kind: task.completed

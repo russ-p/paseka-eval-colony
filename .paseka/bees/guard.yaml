@@ -1,0 +1,21 @@
+role: guard
+adapter: script
+command: ./scripts/guard.sh
+run_summary: disabled
+worktree: true
+subscribes:
+  - type: MUTATION
+    kind: code.proposal
+    dispatch: direct
+publishes:
+  - type: VERIFICATION
+    kind: verification.success
+  - type: VERIFICATION
+    kind: verification.failed
+completion_contract:
+  required:
+    - type: VERIFICATION
+      kind_one_of:
+        - verification.success
+        - verification.failed
+      count: 1

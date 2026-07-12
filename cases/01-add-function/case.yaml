@@ -1,0 +1,30 @@
+id: 01-add-function
+trace: eval-01-add-function
+seed: seed/
+task:
+  title: "Add sum(a, b)"
+  body: |
+    Implement Sum in the seeded package so tests pass.
+  bee: builder
+  intent: test-fix
+  review: none
+fault:
+  mode: scripted
+  broken_diff: broken/bad.patch
+oracle:
+  command: "go test ./..."
+  workdir: "."
+  max_rework_cycles: 2
+  expect_event_chain:
+    - type: MUTATION
+      kind: code.proposal
+    - type: VERIFICATION
+      kind: verification.failed
+    - type: MUTATION
+      kind: code.proposal
+    - type: VERIFICATION
+      kind: verification.success
+score:
+  must_pass_tests: true
+  max_builder_runs: 3
+timeout: 10m

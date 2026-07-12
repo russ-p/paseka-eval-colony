@@ -1,0 +1,15 @@
+role: builder
+adapter: script
+command: ./scripts/builder.sh
+run_summary: disabled
+worktree: true
+subscribes:
+  - type: SIGNAL
+    kind: task.ready
+    dispatch: task
+  - type: VERIFICATION
+    kind: verification.failed
+    dispatch: direct
+publishes:
+  - type: MUTATION
+    kind: code.proposal

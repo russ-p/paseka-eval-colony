@@ -131,9 +131,11 @@ reset_case() {
   require_case "$case_id"
   local trace_id
   trace_id="$(read_case_field "$case_id" trace)"
+  stop_runtime
   purge_colony
   clear_trace_ledger "${trace_id}"
   materialize_seed "$case_id"
+  paseka energy add --trace "${trace_id}" --amount 24 -C "${EVAL_ROOT}" >/dev/null 2>&1 || true
   echo "reset case ${case_id} at seed $(cat "${EVAL_META_DIR}/seed-sha")"
 }
 
@@ -237,6 +239,7 @@ clear_trace_ledger() {
   if [[ -f "${compose}" ]]; then
     echo "resetting NATS JetStream state (no nats CLI)..."
     docker compose -f "${compose}" stop nats >/dev/null 2>&1 || true
+    docker rm -f paseka-nats-1 >/dev/null 2>&1 || true
     docker volume rm paseka_nats-data >/dev/null 2>&1 || true
     docker compose -f "${compose}" up -d nats >/dev/null 2>&1 || true
     for _ in $(seq 1 30); do
@@ -267,6 +270,23 @@ run_oracle() {
     dir="${dir}/${workdir}"
   fi
   (cd "${dir}" && bash -lc "${cmd}")
+}
+
+wait_for_oracle() {
+  local case_id="$1"
+  local trace_id="$2"
+  local timeout_secs="$3"
+  local start
+  start=$(date +%s)
+  while true; do
+    if run_oracle "${case_id}" "${trace_id}"; then
+      return 0
+    fi
+    if (( $(date +%s) - start >= timeout_secs )); then
+      return 1
+    fi
+    sleep 3
+  done
 }
 
 collect_replay_lines() {

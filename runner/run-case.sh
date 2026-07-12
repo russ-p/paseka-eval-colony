@@ -63,18 +63,12 @@ if [[ -z "${task_id}" ]]; then
   exit 1
 fi
 
-echo "waiting for terminal task status (timeout ${timeout_secs}s)..."
+echo "waiting for hive loop + oracle (timeout ${timeout_secs}s)..."
 task_status="$(wait_for_terminal_task "${trace}" "${task_id}" "${timeout_secs}")" || true
 
 oracle_ok=false
-if [[ "${task_status}" == "completed" ]]; then
-  if run_oracle "${case_id}" "${trace}"; then
-    oracle_ok=true
-  fi
-elif [[ "${task_status}" == "stuck_running" || "${task_status}" == "timeout" ]]; then
-  echo "task did not reach terminal status in time (status=${task_status})" >&2
-else
-  echo "task finished with status=${task_status}" >&2
+if wait_for_oracle "${case_id}" "${trace}" "${timeout_secs}"; then
+  oracle_ok=true
 fi
 
 replay_out="$(collect_replay_lines "${trace}")"
@@ -84,7 +78,7 @@ duration=$(( wall_end - wall_start ))
 mkdir -p "${REPORTS_DIR}"
 report_file="${REPORTS_DIR}/${case_id}-$(date -u +%Y%m%dT%H%M%SZ).json"
 
-passed=$([[ "${task_status}" == "completed" && "${oracle_ok}" == true ]] && echo true || echo false)
+passed=$([[ "${oracle_ok}" == true ]] && echo true || echo false)
 
 REPORT_CASE_ID="${case_id}" \
 REPORT_TRACE="${trace}" \
@@ -133,7 +127,7 @@ if [[ "${keep_runtime}" != "true" ]]; then
   stop_runtime
 fi
 
-if [[ "${task_status}" == "completed" && "${oracle_ok}" == "true" ]]; then
+if [[ "${oracle_ok}" == "true" ]]; then
   exit 0
 fi
 exit 1

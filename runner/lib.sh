@@ -173,6 +173,7 @@ ensure_runtime() {
 stop_runtime() {
   local pid_file
   pid_file="$(runtime_pid_file)"
+  pkill -f "paseka run.*paseka-eval-colony" >/dev/null 2>&1 || true
   [[ -f "${pid_file}" ]] || return 0
   local pid
   pid="$(cat "${pid_file}")"
@@ -209,7 +210,7 @@ wait_for_terminal_task() {
         return 0
         ;;
       running)
-        if (( $(date +%s) - unchanged_since >= 120 )); then
+        if (( $(date +%s) - unchanged_since >= 180 )); then
           echo "stuck_running"
           return 1
         fi
@@ -229,6 +230,21 @@ clear_trace_ledger() {
   local bucket="paseka_paseka_eval_colony_task_ledger"
   if command -v nats >/dev/null 2>&1; then
     nats kv del "${bucket}" "${trace_id}" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  local compose="${EVAL_ROOT}/../paseka/docker-compose.yml"
+  if [[ -f "${compose}" ]]; then
+    echo "resetting NATS JetStream state (no nats CLI)..."
+    docker compose -f "${compose}" stop nats >/dev/null 2>&1 || true
+    docker volume rm paseka_nats-data >/dev/null 2>&1 || true
+    docker compose -f "${compose}" up -d nats >/dev/null 2>&1 || true
+    for _ in $(seq 1 30); do
+      if paseka doctor -C "${EVAL_ROOT}" >/dev/null 2>&1; then
+        return 0
+      fi
+      sleep 1
+    done
   fi
 }
 

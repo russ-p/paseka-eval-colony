@@ -1,4 +1,4 @@
 slug: paseka-eval-colony
 defaults:
   prompt_template: default.md
-  energy_budget: 6
+  energy_budget: 12

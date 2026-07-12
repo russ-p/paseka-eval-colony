@@ -1,0 +1,23 @@
+id: 02-energy-exhausted
+trace: eval-02-energy-exhausted
+seed: seed/
+task:
+  title: "Add sum(a, b) until honey runs out"
+  body: |
+    Implement Sum in the seeded package so tests pass.
+  bee: builder
+  intent: test-fix
+  review: required
+fault:
+  mode: always_broken
+energy:
+  budget: 2
+  topup: 0
+oracle:
+  command: "go test ./..."
+  workdir: "."
+score:
+  must_pass_tests: false
+  expect_task_status: blocked
+  expect_summary: "Honey reserve exhausted"
+timeout: 5m

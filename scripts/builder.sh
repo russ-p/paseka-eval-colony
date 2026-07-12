@@ -7,6 +7,7 @@ workspace="${PASEKA_WORKSPACE:?missing PASEKA_WORKSPACE}"
 eval_dir="${root}/.eval"
 case_dir_file="${eval_dir}/case-dir"
 runs_file="${eval_dir}/builder-runs"
+fault_mode_file="${eval_dir}/fault-mode"
 
 if [[ ! -f "${case_dir_file}" ]]; then
   echo "eval builder: missing ${case_dir_file} (run runner/reset.sh first)" >&2
@@ -14,6 +15,9 @@ if [[ ! -f "${case_dir_file}" ]]; then
 fi
 
 case_dir="$(cat "${case_dir_file}")"
+fault_mode="scripted"
+[[ -f "${fault_mode_file}" ]] && fault_mode="$(cat "${fault_mode_file}")"
+
 runs=0
 [[ -f "${runs_file}" ]] && runs="$(cat "${runs_file}")"
 runs=$((runs + 1))
@@ -21,7 +25,7 @@ echo "${runs}" > "${runs_file}"
 
 cd "${workspace}"
 
-if [[ "${runs}" -eq 1 ]]; then
+apply_broken() {
   if [[ -d "${case_dir}/broken/pkg" ]]; then
     rsync -a "${case_dir}/broken/pkg/" "${workspace}/pkg/"
     echo "eval builder: applied broken/ tree (run ${runs})"
@@ -32,6 +36,12 @@ if [[ "${runs}" -eq 1 ]]; then
     echo "eval builder: no broken fixture for run ${runs}" >&2
     exit 1
   fi
+}
+
+if [[ "${fault_mode}" == "always_broken" ]]; then
+  apply_broken
+elif [[ "${runs}" -eq 1 ]]; then
+  apply_broken
 else
   if [[ -d "${case_dir}/expect" ]]; then
     rsync -a "${case_dir}/expect/" "${workspace}/"

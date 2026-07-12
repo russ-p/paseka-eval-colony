@@ -11,6 +11,12 @@ if ! go test ./pkg/...; then
   kind="verification.failed"
 fi
 
+task_id="${PASEKA_TASK_ID:-}"
+task_field=""
+if [[ -n "${task_id}" ]]; then
+  task_field=",\"taskId\":\"${task_id}\""
+fi
+
 paseka event emit --stdin -C "${PASEKA_COLONY_ROOT}" <<EOF
-{"traceId":"${PASEKA_TRACE_ID}","agentId":"${PASEKA_AGENT_ID}","type":"VERIFICATION","payload":{"kind":"${kind}","summary":"${summary}"}}
+{"traceId":"${PASEKA_TRACE_ID}","agentId":"${PASEKA_AGENT_ID}","type":"VERIFICATION","payload":{"kind":"${kind}","summary":"${summary}"${task_field}}}
 EOF

@@ -5,6 +5,8 @@ set -euo pipefail
 EVAL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EVAL_META_DIR="${EVAL_ROOT}/.eval"
 REPORTS_DIR="${EVAL_ROOT}/reports"
+COLONY_CONFIG="${EVAL_ROOT}/.paseka/colony.yaml"
+COLONY_CONFIG_BACKUP="${EVAL_META_DIR}/colony.yaml.bak"
 
 case_dir_for() {
   local case_id="$1"
@@ -73,6 +75,18 @@ elif field == "fault_mode":
     print(nested("fault", "mode") or "scripted")
 elif field == "fault_broken_diff":
     print(nested("fault", "broken_diff") or "")
+elif field == "energy_budget":
+    print(nested("energy", "budget") or "")
+elif field == "energy_topup":
+    val = nested("energy", "topup")
+    print(val if val != "" else "24")
+elif field == "score_must_pass_tests":
+    val = nested("score", "must_pass_tests")
+    print(val if val != "" else "true")
+elif field == "score_expect_task_status":
+    print(nested("score", "expect_task_status") or "")
+elif field == "score_expect_summary":
+    print(nested("score", "expect_summary") or "")
 else:
     raise SystemExit(f"unknown field: {field}")
 PY
@@ -91,7 +105,8 @@ timeout_seconds() {
 }
 
 purge_colony() {
-  paseka purge --runs --worktrees --state --yes -C "${EVAL_ROOT}"
+  local trace_id="$1"
+  paseka purge --runs --worktrees --state --bus --trace "${trace_id}" --yes -C "${EVAL_ROOT}"
   git -C "${EVAL_ROOT}" worktree prune >/dev/null 2>&1 || true
   while IFS= read -r branch; do
     [[ -z "${branch}" ]] && continue
@@ -126,16 +141,66 @@ materialize_seed() {
   git -C "${EVAL_ROOT}" rev-parse HEAD > "${EVAL_META_DIR}/seed-sha"
 }
 
+set_colony_energy_budget() {
+  local budget="$1"
+  mkdir -p "${EVAL_META_DIR}"
+  if [[ ! -f "${COLONY_CONFIG_BACKUP}" ]]; then
+    cp "${COLONY_CONFIG}" "${COLONY_CONFIG_BACKUP}"
+  fi
+  python3 - "${budget}" "${COLONY_CONFIG}" <<'PY'
+import pathlib
+import re
+import sys
+
+budget = int(sys.argv[1])
+path = pathlib.Path(sys.argv[2])
+text = path.read_text()
+if re.search(r"^\s+energy_budget:\s*\d+\s*$", text, re.M):
+    text = re.sub(
+        r"^(\s+energy_budget:)\s*\d+\s*$",
+        rf"\g<1> {budget}",
+        text,
+        count=1,
+        flags=re.M,
+    )
+else:
+    text = re.sub(
+        r"^(defaults:\s*\n)",
+        rf"\1  energy_budget: {budget}\n",
+        text,
+        count=1,
+        flags=re.M,
+    )
+path.write_text(text)
+PY
+}
+
+restore_colony_config() {
+  if [[ -f "${COLONY_CONFIG_BACKUP}" ]]; then
+    cp "${COLONY_CONFIG_BACKUP}" "${COLONY_CONFIG}"
+    rm -f "${COLONY_CONFIG_BACKUP}"
+  fi
+}
+
 reset_case() {
   local case_id="$1"
   require_case "$case_id"
-  local trace_id
+  local trace_id fault_mode energy_budget energy_topup
   trace_id="$(read_case_field "$case_id" trace)"
+  fault_mode="$(read_case_field "$case_id" fault_mode)"
+  energy_budget="$(read_case_field "$case_id" energy_budget)"
+  energy_topup="$(read_case_field "$case_id" energy_topup)"
   stop_runtime
-  purge_colony
-  clear_trace_ledger "${trace_id}"
+  purge_colony "${trace_id}"
+  restore_colony_config
+  if [[ -n "${energy_budget}" ]]; then
+    set_colony_energy_budget "${energy_budget}"
+  fi
   materialize_seed "$case_id"
-  paseka energy add --trace "${trace_id}" --amount 24 -C "${EVAL_ROOT}" >/dev/null 2>&1 || true
+  echo "${fault_mode}" > "${EVAL_META_DIR}/fault-mode"
+  if [[ "${energy_topup}" =~ ^[0-9]+$ ]] && (( energy_topup > 0 )); then
+    paseka energy add --trace "${trace_id}" --amount "${energy_topup}" -C "${EVAL_ROOT}" >/dev/null 2>&1 || true
+  fi
   echo "reset case ${case_id} at seed $(cat "${EVAL_META_DIR}/seed-sha")"
 }
 
@@ -186,6 +251,34 @@ stop_runtime() {
   rm -f "${pid_file}"
 }
 
+wait_for_expected_task_status() {
+  local trace_id="$1"
+  local task_id="$2"
+  local expect_status="$3"
+  local timeout_secs="$4"
+  local start now status
+  start=$(date +%s)
+  while true; do
+    status="$(
+      paseka task list --trace "${trace_id}" -C "${EVAL_ROOT}" 2>/dev/null \
+        | awk -v id="${task_id}" '$1 == id { print $2; found=1 } END { if (!found) print "" }'
+    )"
+    if [[ -z "${status}" ]]; then
+      status="missing"
+    fi
+    if [[ "${status}" == "${expect_status}" ]]; then
+      echo "${status}"
+      return 0
+    fi
+    now=$(date +%s)
+    if (( now - start >= timeout_secs )); then
+      echo "${status}"
+      return 1
+    fi
+    sleep 2
+  done
+}
+
 wait_for_terminal_task() {
   local trace_id="$1"
   local task_id="$2"
@@ -225,30 +318,6 @@ wait_for_terminal_task() {
     fi
     sleep 2
   done
-}
-
-clear_trace_ledger() {
-  local trace_id="$1"
-  local bucket="paseka_paseka_eval_colony_task_ledger"
-  if command -v nats >/dev/null 2>&1; then
-    nats kv del "${bucket}" "${trace_id}" >/dev/null 2>&1 || true
-    return 0
-  fi
-
-  local compose="${EVAL_ROOT}/../paseka/docker-compose.yml"
-  if [[ -f "${compose}" ]]; then
-    echo "resetting NATS JetStream state (no nats CLI)..."
-    docker compose -f "${compose}" stop nats >/dev/null 2>&1 || true
-    docker rm -f paseka-nats-1 >/dev/null 2>&1 || true
-    docker volume rm paseka_nats-data >/dev/null 2>&1 || true
-    docker compose -f "${compose}" up -d nats >/dev/null 2>&1 || true
-    for _ in $(seq 1 30); do
-      if paseka doctor -C "${EVAL_ROOT}" >/dev/null 2>&1; then
-        return 0
-      fi
-      sleep 1
-    done
-  fi
 }
 
 worktree_for_trace() {
@@ -292,4 +361,63 @@ wait_for_oracle() {
 collect_replay_lines() {
   local trace_id="$1"
   paseka replay "${trace_id}" -C "${EVAL_ROOT}" 2>/dev/null
+}
+
+energy_show_field() {
+  local trace_id="$1"
+  local field="$2"
+  paseka energy show --trace "${trace_id}" -C "${EVAL_ROOT}" 2>/dev/null \
+    | awk -v key="${field}" '
+      $1 == "budget:" && key == "budget" { print $2; found=1 }
+      $1 == "remaining:" && key == "remaining" { print $2; found=1 }
+      END { if (!found) print "" }
+    '
+}
+
+task_show_field() {
+  local trace_id="$1"
+  local task_id="$2"
+  local field="$3"
+  paseka task show --trace "${trace_id}" --task "${task_id}" -C "${EVAL_ROOT}" 2>/dev/null \
+    | awk -v key="${field}" '
+      $1 == "status:" && key == "status" { print $2; found=1 }
+      $1 == "summary:" && key == "summary" {
+        sub(/^  summary:[[:space:]]*/, "")
+        print $0
+        found=1
+      }
+      END { if (!found) print "" }
+    '
+}
+
+check_energy_exhaustion_oracle() {
+  local case_id="$1"
+  local trace_id="$2"
+  local task_id="$3"
+  local expect_status expect_summary energy_budget remaining status summary
+  expect_status="$(read_case_field "$case_id" score_expect_task_status)"
+  expect_summary="$(read_case_field "$case_id" score_expect_summary)"
+  energy_budget="$(read_case_field "$case_id" energy_budget)"
+
+  remaining="$(energy_show_field "${trace_id}" remaining)"
+  status="$(task_show_field "${trace_id}" "${task_id}" status)"
+  summary="$(task_show_field "${trace_id}" "${task_id}" summary)"
+
+  if [[ "${remaining}" != "0" ]]; then
+    echo "energy oracle: remaining=${remaining}, want 0" >&2
+    return 1
+  fi
+  if [[ -n "${energy_budget}" && "${energy_budget}" != "$(energy_show_field "${trace_id}" budget)" ]]; then
+    echo "energy oracle: budget mismatch" >&2
+    return 1
+  fi
+  if [[ -n "${expect_status}" && "${status}" != "${expect_status}" ]]; then
+    echo "energy oracle: status=${status}, want ${expect_status}" >&2
+    return 1
+  fi
+  if [[ -n "${expect_summary}" && "${summary}" != "${expect_summary}" ]]; then
+    echo "energy oracle: summary=${summary@Q}, want ${expect_summary@Q}" >&2
+    return 1
+  fi
+  return 0
 }

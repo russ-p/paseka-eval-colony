@@ -26,6 +26,8 @@ intent="$(read_case_field "${case_id}" task_intent)"
 review="$(read_case_field "${case_id}" task_review)"
 timeout_raw="$(read_case_field "${case_id}" timeout)"
 timeout_secs="$(timeout_seconds "${timeout_raw}")"
+must_pass_tests="$(read_case_field "${case_id}" score_must_pass_tests)"
+expect_task_status="$(read_case_field "${case_id}" score_expect_task_status)"
 task_body_file="$(case_dir_for "${case_id}")/task.body"
 
 if [[ -z "${title}" ]]; then
@@ -36,6 +38,14 @@ if [[ ! -f "${task_body_file}" ]]; then
   echo "case ${case_id}: missing ${task_body_file}" >&2
   exit 1
 fi
+
+cleanup() {
+  restore_colony_config
+  if [[ "${keep_runtime}" != "true" ]]; then
+    stop_runtime
+  fi
+}
+trap cleanup EXIT
 
 started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 wall_start=$(date +%s)
@@ -64,21 +74,40 @@ if [[ -z "${task_id}" ]]; then
 fi
 
 echo "waiting for hive loop + oracle (timeout ${timeout_secs}s)..."
-task_status="$(wait_for_terminal_task "${trace}" "${task_id}" "${timeout_secs}")" || true
+if [[ "${must_pass_tests}" == "false" && -n "${expect_task_status}" ]]; then
+  task_status="$(wait_for_expected_task_status "${trace}" "${task_id}" "${expect_task_status}" "${timeout_secs}")" || true
+else
+  task_status="$(wait_for_terminal_task "${trace}" "${task_id}" "${timeout_secs}")" || true
+fi
 
 oracle_ok=false
-if wait_for_oracle "${case_id}" "${trace}" "${timeout_secs}"; then
-  oracle_ok=true
+if [[ "${must_pass_tests}" == "false" ]]; then
+  if check_energy_exhaustion_oracle "${case_id}" "${trace}" "${task_id}"; then
+    oracle_ok=true
+  fi
+else
+  if wait_for_oracle "${case_id}" "${trace}" "${timeout_secs}"; then
+    oracle_ok=true
+  fi
 fi
 
 replay_out="$(collect_replay_lines "${trace}")"
 wall_end=$(date +%s)
 duration=$(( wall_end - wall_start ))
 
+passed=false
+if [[ "${must_pass_tests}" == "false" ]]; then
+  if [[ "${oracle_ok}" == "true" && "${task_status}" == "${expect_task_status}" ]]; then
+    passed=true
+  fi
+else
+  if [[ "${oracle_ok}" == "true" ]]; then
+    passed=true
+  fi
+fi
+
 mkdir -p "${REPORTS_DIR}"
 report_file="${REPORTS_DIR}/${case_id}-$(date -u +%Y%m%dT%H%M%SZ).json"
-
-passed=$([[ "${oracle_ok}" == true ]] && echo true || echo false)
 
 REPORT_CASE_ID="${case_id}" \
 REPORT_TRACE="${trace}" \
@@ -123,11 +152,7 @@ echo "report: ${report_file}"
 echo "replay:"
 echo "${replay_out}"
 
-if [[ "${keep_runtime}" != "true" ]]; then
-  stop_runtime
-fi
-
-if [[ "${oracle_ok}" == "true" ]]; then
+if [[ "${passed}" == "true" ]]; then
   exit 0
 fi
 exit 1

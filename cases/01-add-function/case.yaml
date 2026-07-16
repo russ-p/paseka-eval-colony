@@ -26,5 +26,6 @@ oracle:
       kind: verification.success
 score:
   must_pass_tests: true
+  expect_task_status: completed
   max_builder_runs: 3
 timeout: 10m

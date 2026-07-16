@@ -93,6 +93,70 @@ PY
 )
 }
 
+read_case_event_chain_json() {
+  local case_id="$1"
+  (cd "${EVAL_ROOT}" && python3 - "$case_id" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+case_id = sys.argv[1]
+text = (pathlib.Path("cases") / case_id / "case.yaml").read_text()
+block = re.search(r"^oracle:\s*\n((?:  .*\n?)*)", text, re.M)
+chain = []
+if block:
+    for m in re.finditer(
+        r"^\s+- type:\s*(\S+)\s*\n\s+kind:\s*(\S+)\s*$",
+        block.group(1),
+        re.M,
+    ):
+        chain.append({"type": m.group(1), "kind": m.group(2)})
+print(json.dumps(chain))
+PY
+)
+}
+
+check_replay_event_chain() {
+  local case_id="$1"
+  local replay_out="$2"
+  local chain_json
+  chain_json="$(read_case_event_chain_json "${case_id}")"
+  REPLAY_TEXT="${replay_out}" EXPECTED_CHAIN="${chain_json}" python3 - <<'PY'
+import json
+import os
+import re
+import sys
+
+expected = json.loads(os.environ.get("EXPECTED_CHAIN", "[]"))
+if not expected:
+    sys.exit(0)
+
+replay = os.environ.get("REPLAY_TEXT", "")
+actual = []
+for line in replay.splitlines():
+    m = re.match(r"^\s*\d+\.\s+(\S+)\s+\(([^)]+)\)", line)
+    if m:
+        actual.append({"type": m.group(1), "kind": m.group(2)})
+
+idx = 0
+for item in expected:
+    while idx < len(actual):
+        if actual[idx] == item:
+            idx += 1
+            break
+        idx += 1
+    else:
+        print(
+            f"event chain: missing {item['type']}/{item['kind']} "
+            f"(expected subsequence of {len(expected)} step(s), got {len(actual)} replay event(s))",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+sys.exit(0)
+PY
+}
+
 timeout_seconds() {
   local raw="$1"
   if [[ "${raw}" =~ ^([0-9]+)m$ ]]; then
@@ -276,6 +340,32 @@ wait_for_expected_task_status() {
       return 1
     fi
     sleep 2
+  done
+}
+
+wait_for_success_scoring() {
+  local case_id="$1"
+  local trace_id="$2"
+  local task_id="$3"
+  local expect_status="$4"
+  local timeout_secs="$5"
+  local start now status
+  start=$(date +%s)
+  while true; do
+    status="$(task_show_field "${trace_id}" "${task_id}" status)"
+    if [[ -z "${status}" ]]; then
+      status="missing"
+    fi
+    if [[ "${status}" == "${expect_status}" ]] && run_oracle "${case_id}" "${trace_id}"; then
+      echo "${status}"
+      return 0
+    fi
+    now=$(date +%s)
+    if (( now - start >= timeout_secs )); then
+      echo "${status}"
+      return 1
+    fi
+    sleep 3
   done
 }
 

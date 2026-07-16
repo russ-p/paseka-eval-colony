@@ -73,20 +73,28 @@ if [[ -z "${task_id}" ]]; then
   exit 1
 fi
 
-echo "waiting for hive loop + oracle (timeout ${timeout_secs}s)..."
-if [[ "${must_pass_tests}" == "false" && -n "${expect_task_status}" ]]; then
-  task_status="$(wait_for_expected_task_status "${trace}" "${task_id}" "${expect_task_status}" "${timeout_secs}")" || true
-else
-  task_status="$(wait_for_terminal_task "${trace}" "${task_id}" "${timeout_secs}")" || true
+if [[ "${must_pass_tests}" == "true" && -z "${expect_task_status}" ]]; then
+  expect_task_status="completed"
 fi
 
+echo "waiting for hive loop + oracle (timeout ${timeout_secs}s)..."
 oracle_ok=false
 if [[ "${must_pass_tests}" == "false" ]]; then
+  if [[ -n "${expect_task_status}" ]]; then
+    task_status="$(wait_for_expected_task_status "${trace}" "${task_id}" "${expect_task_status}" "${timeout_secs}")" || true
+  else
+    task_status="$(wait_for_terminal_task "${trace}" "${task_id}" "${timeout_secs}")" || true
+  fi
   if check_energy_exhaustion_oracle "${case_id}" "${trace}" "${task_id}"; then
     oracle_ok=true
   fi
 else
-  if wait_for_oracle "${case_id}" "${trace}" "${timeout_secs}"; then
+  if ! task_status="$(wait_for_success_scoring "${case_id}" "${trace}" "${task_id}" "${expect_task_status}" "${timeout_secs}")"; then
+    task_status="${task_status:-timeout}"
+    if run_oracle "${case_id}" "${trace}"; then
+      oracle_ok=true
+    fi
+  else
     oracle_ok=true
   fi
 fi
@@ -95,13 +103,18 @@ replay_out="$(collect_replay_lines "${trace}")"
 wall_end=$(date +%s)
 duration=$(( wall_end - wall_start ))
 
+event_chain_ok=false
+if check_replay_event_chain "${case_id}" "${replay_out}"; then
+  event_chain_ok=true
+fi
+
 passed=false
 if [[ "${must_pass_tests}" == "false" ]]; then
   if [[ "${oracle_ok}" == "true" && "${task_status}" == "${expect_task_status}" ]]; then
     passed=true
   fi
 else
-  if [[ "${oracle_ok}" == "true" ]]; then
+  if [[ "${oracle_ok}" == "true" && "${task_status}" == "${expect_task_status}" && "${event_chain_ok}" == "true" ]]; then
     passed=true
   fi
 fi
@@ -116,7 +129,9 @@ REPORT_SEED_SHA="${EVAL_META_DIR}/seed-sha" \
 REPORT_STARTED_AT="${started_at}" \
 REPORT_DURATION="${duration}" \
 REPORT_TASK_STATUS="${task_status}" \
+REPORT_EXPECT_TASK_STATUS="${expect_task_status}" \
 REPORT_TESTS_PASSED="${oracle_ok}" \
+REPORT_EVENT_CHAIN_OK="${event_chain_ok}" \
 REPORT_PASSED="${passed}" \
 REPORT_REPLAY="${replay_out}" \
 python3 - "${report_file}" <<'PY'
@@ -139,7 +154,9 @@ report = {
     "started_at": os.environ["REPORT_STARTED_AT"],
     "duration_sec": int(os.environ["REPORT_DURATION"]),
     "task_status": os.environ["REPORT_TASK_STATUS"],
+    "expect_task_status": os.environ.get("REPORT_EXPECT_TASK_STATUS", ""),
     "tests_passed": as_bool("REPORT_TESTS_PASSED"),
+    "event_chain_ok": as_bool("REPORT_EVENT_CHAIN_OK"),
     "passed": as_bool("REPORT_PASSED"),
     "replay": [line for line in replay.splitlines() if line.strip()],
 }

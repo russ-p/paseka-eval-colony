@@ -15,7 +15,7 @@ runner/           reset + run-case harness (Tier B)
 
 ## Status
 
-Phase 2 — Tier B cases (`01-add-function`, `02-energy-exhausted`, `03-first-pass`), script bees, reset + run-case runner.
+Phase 2 — Tier B cases `01`–`06` (scripted loop, energy block, first-pass, inject-mutation, kill, human reject), script bees, reset + run-case runner.
 
 ## Quick start
 
@@ -26,7 +26,6 @@ docker compose -f ../paseka/docker-compose.yml up -d nats
 # from this repo root
 paseka init          # idempotent
 ./runner/run-case.sh 01-add-function
-./runner/run-case.sh 03-first-pass
 ```
 
 Tier A evals live in the Paseka platform repo (`internal/runtime` tests).
@@ -35,8 +34,11 @@ Tier A evals live in the Paseka platform repo (`internal/runtime` tests).
 
 | Case | Trace | Fault mode | Oracle |
 | ---- | ----- | ---------- | ------ |
-| `01-add-function` | `eval-01-add-function` | `scripted` | `go test ./...` |
-| `02-energy-exhausted` | `eval-02-energy-exhausted` | `always_broken` | energy → blocked |
-| `03-first-pass` | `eval-03-first-pass` | `first_pass` | `go test ./pkg/...` |
+| `01-add-function` | `eval-01-add-function` | `scripted` | rework loop → tests pass |
+| `02-energy-exhausted` | `eval-02-energy-exhausted` | `always_broken` | energy → `blocked` |
+| `03-first-pass` | `eval-03-first-pass` | `first_pass` | no rework → tests pass |
+| `04-inject-mutation` | `eval-04-inject-mutation` | `inject-mutation` | runner signal → guard→builder |
+| `05-kill-cancel` | `eval-05-kill-cancel` | `always_broken` + kill | `cancelled`, honey remains |
+| `06-human-reject` | `eval-06-human-reject` | `first_pass` + HITL | reject → rework → approve |
 
 Reset model: `runner/reset.sh` purges ephemeral state with `--reseed-energy`, copies `cases/<id>/seed/` to repo root, commits `seedSha`, uses fixed `--trace` from `case.yaml`.

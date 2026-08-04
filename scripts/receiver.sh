@@ -1,6 +1,20 @@
 #!/usr/bin/env bash
 # Eval receiver: complete task after guard success.
+# For review: required|final, human approve/reject owns completion — do not
+# auto-emit task.completed (would race HITL and skip human.feedback).
 set -euo pipefail
+
+root="${PASEKA_COLONY_ROOT:?missing PASEKA_COLONY_ROOT}"
+review_file="${root}/.eval/task-review"
+review="none"
+[[ -f "${review_file}" ]] && review="$(tr -d '[:space:]' < "${review_file}")"
+
+case "${review}" in
+  required|final)
+    echo "eval receiver: skipping auto-complete (review=${review}; await HITL)"
+    exit 0
+    ;;
+esac
 
 task_id="${PASEKA_TASK_ID:-}"
 if [[ -z "${task_id}" ]]; then

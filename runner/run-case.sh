@@ -31,6 +31,7 @@ must_pass_tests="$(read_case_field "${case_id}" score_must_pass_tests)"
 expect_task_status="$(read_case_field "${case_id}" score_expect_task_status)"
 kill_after="$(read_case_field "${case_id}" operator_kill_after)"
 kill_reason="$(read_case_field "${case_id}" operator_kill_reason)"
+reject_when="$(read_case_field "${case_id}" operator_reject_when)"
 task_body_file="$(case_dir_for "${case_id}")/task.body"
 
 if [[ -z "${title}" ]]; then
@@ -112,6 +113,17 @@ if [[ -n "${kill_after}" ]]; then
   if check_kill_oracle "${case_id}" "${trace}" "${task_id}" "${replay_out}"; then
     oracle_ok=true
   fi
+elif [[ -n "${reject_when}" ]]; then
+  # HITL reject → rework → approve (e.g. 06-human-reject).
+  if task_status="$(run_human_reject_loop "${case_id}" "${trace}" "${task_id}" "${timeout_secs}")"; then
+    oracle_ok=true
+  else
+    task_status="${task_status:-timeout}"
+    if run_oracle "${case_id}" "${trace}"; then
+      oracle_ok=true
+    fi
+  fi
+  replay_out="$(collect_replay_lines "${trace}")"
 elif [[ "${must_pass_tests}" == "false" ]]; then
   if [[ -n "${expect_task_status}" ]]; then
     task_status="$(wait_for_expected_task_status "${trace}" "${task_id}" "${expect_task_status}" "${timeout_secs}")" || true
@@ -148,6 +160,10 @@ fi
 
 passed=false
 if [[ -n "${kill_after}" ]]; then
+  if [[ "${oracle_ok}" == "true" && "${task_status}" == "${expect_task_status}" && "${event_chain_ok}" == "true" ]]; then
+    passed=true
+  fi
+elif [[ -n "${reject_when}" ]]; then
   if [[ "${oracle_ok}" == "true" && "${task_status}" == "${expect_task_status}" && "${event_chain_ok}" == "true" ]]; then
     passed=true
   fi

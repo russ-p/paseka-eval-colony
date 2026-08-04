@@ -95,6 +95,14 @@ elif field == "operator_kill_after":
     print(nested("operator", "kill_after") or "")
 elif field == "operator_kill_reason":
     print(nested("operator", "reason") or "")
+elif field == "operator_reject_when":
+    print(nested("operator", "reject_when") or "")
+elif field == "operator_reject_feedback":
+    print(nested("operator", "feedback") or "")
+elif field == "operator_approve_when":
+    print(nested("operator", "approve_when") or "")
+elif field == "operator_approve_summary":
+    print(nested("operator", "summary") or "")
 else:
     raise SystemExit(f"unknown field: {field}")
 PY
@@ -203,6 +211,8 @@ materialize_seed() {
   echo "${case_dir}" > "${EVAL_META_DIR}/case-dir"
   echo "0" > "${EVAL_META_DIR}/builder-runs"
   echo "$(read_case_field "$case_id" trace)" > "${EVAL_META_DIR}/trace"
+  # Script receiver reads this to skip auto-complete for HITL review gates.
+  echo "$(read_case_field "$case_id" task_review)" > "${EVAL_META_DIR}/task-review"
 
   git -C "${EVAL_ROOT}" add go.mod pkg 2>/dev/null || true
   if ! git -C "${EVAL_ROOT}" rev-parse HEAD >/dev/null 2>&1; then
@@ -612,6 +622,213 @@ operator_kill_trace() {
   fi
   echo "operator kill: paseka ${args[*]}"
   paseka "${args[@]}"
+}
+
+# wait_for_replay_kind blocks until paseka replay shows TYPE (kind) for the trace.
+wait_for_replay_kind() {
+  local trace_id="$1"
+  local event_type="$2"
+  local event_kind="$3"
+  local timeout_secs="$4"
+  local start now replay
+  start=$(date +%s)
+  while true; do
+    replay="$(collect_replay_lines "${trace_id}")"
+    if echo "${replay}" | grep -qE "${event_type}[[:space:]]+\(${event_kind}\)"; then
+      echo "replay has ${event_type}/${event_kind}" >&2
+      return 0
+    fi
+    now=$(date +%s)
+    if (( now - start >= timeout_secs )); then
+      echo "timeout waiting for replay ${event_type}/${event_kind}" >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+# wait_for_task_status_change returns when status differs from from_status (or timeout).
+wait_for_task_status_change() {
+  local trace_id="$1"
+  local task_id="$2"
+  local from_status="$3"
+  local timeout_secs="$4"
+  local start now status
+  start=$(date +%s)
+  while true; do
+    status="$(task_show_field "${trace_id}" "${task_id}" status)"
+    if [[ -z "${status}" ]]; then
+      status="missing"
+    fi
+    if [[ "${status}" != "${from_status}" ]]; then
+      echo "${status}"
+      return 0
+    fi
+    now=$(date +%s)
+    if (( now - start >= timeout_secs )); then
+      echo "${status}"
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+operator_reject_proposal() {
+  local trace_id="$1"
+  local task_id="$2"
+  local feedback="$3"
+  local args=(
+    proposal reject
+    --trace "${trace_id}"
+    --task "${task_id}"
+    -C "${EVAL_ROOT}"
+  )
+  if [[ -n "${feedback}" ]]; then
+    args+=(--feedback "${feedback}")
+  fi
+  echo "operator reject: paseka ${args[*]}" >&2
+  paseka "${args[@]}"
+}
+
+operator_approve_proposal() {
+  local trace_id="$1"
+  local task_id="$2"
+  local summary="$3"
+  local args=(
+    proposal approve
+    --trace "${trace_id}"
+    --task "${task_id}"
+    -C "${EVAL_ROOT}"
+  )
+  if [[ -n "${summary}" ]]; then
+    args+=(--summary "${summary}")
+  fi
+  echo "operator approve: paseka ${args[*]}" >&2
+  paseka "${args[@]}"
+}
+
+# replay_has_verification_after_feedback exits 0 when VERIFICATION/verification.success
+# appears after INSIGHT/human.feedback in the given replay text.
+replay_has_verification_after_feedback() {
+  local replay_out="$1"
+  REPLAY_TEXT="${replay_out}" python3 - <<'INNER'
+import os, re, sys
+actual = []
+for line in os.environ.get("REPLAY_TEXT", "").splitlines():
+    m = re.match(r"^\s*\d+\.\s+(\S+)\s+\(([^)]+)\)", line)
+    if m:
+        actual.append((m.group(1), m.group(2)))
+seen_feedback = False
+for typ, kind in actual:
+    if typ == "INSIGHT" and kind == "human.feedback":
+        seen_feedback = True
+        continue
+    if seen_feedback and typ == "VERIFICATION" and kind == "verification.success":
+        sys.exit(0)
+sys.exit(1)
+INNER
+}
+
+# run_human_reject_loop drives reject → rework → approve for review: required cases.
+# Returns 0 when the expected terminal status is reached and worktree oracle passes.
+run_human_reject_loop() {
+  local case_id="$1"
+  local trace_id="$2"
+  local task_id="$3"
+  local timeout_secs="$4"
+  local reject_when approve_when feedback summary expect_status
+  local start remaining status gate_wait post_start
+
+  reject_when="$(read_case_field "${case_id}" operator_reject_when)"
+  approve_when="$(read_case_field "${case_id}" operator_approve_when)"
+  feedback="$(read_case_field "${case_id}" operator_reject_feedback)"
+  summary="$(read_case_field "${case_id}" operator_approve_summary)"
+  expect_status="$(read_case_field "${case_id}" score_expect_task_status)"
+  [[ -z "${reject_when}" ]] && reject_when="waiting_review"
+  [[ -z "${approve_when}" ]] && approve_when="waiting_review"
+  [[ -z "${expect_status}" ]] && expect_status="completed"
+
+  start=$(date +%s)
+  remaining="${timeout_secs}"
+
+  echo "waiting for first ${reject_when} before reject (up to ${remaining}s)..." >&2
+  if ! status="$(wait_for_expected_task_status "${trace_id}" "${task_id}" "${reject_when}" "${remaining}")"; then
+    echo "human-reject: first gate status=${status}, want ${reject_when}" >&2
+    return 1
+  fi
+
+  # Isolated review:required enters waiting_review right after builder; wait for
+  # guard verification.success before reject so the event chain is ordered.
+  remaining=$(( timeout_secs - ($(date +%s) - start) ))
+  (( remaining < 30 )) && remaining=30
+  gate_wait="${remaining}"
+  (( gate_wait > 120 )) && gate_wait=120
+  echo "waiting for guard verification.success before reject (up to ${gate_wait}s)..." >&2
+  if ! wait_for_replay_kind "${trace_id}" "VERIFICATION" "verification.success" "${gate_wait}"; then
+    echo "human-reject: verification.success not seen before reject; continuing anyway" >&2
+  fi
+
+  remaining=$(( timeout_secs - ($(date +%s) - start) ))
+  if (( remaining <= 0 )); then
+    echo "human-reject: timed out before reject" >&2
+    return 1
+  fi
+  operator_reject_proposal "${trace_id}" "${task_id}" "${feedback}"
+
+  remaining=$(( timeout_secs - ($(date +%s) - start) ))
+  (( remaining < 30 )) && remaining=30
+  echo "waiting for task to leave ${reject_when} after reject..." >&2
+  if ! status="$(wait_for_task_status_change "${trace_id}" "${task_id}" "${reject_when}" "${remaining}")"; then
+    echo "human-reject: stuck at ${status} after reject" >&2
+    return 1
+  fi
+  echo "post-reject status=${status}" >&2
+
+  remaining=$(( timeout_secs - ($(date +%s) - start) ))
+  if (( remaining <= 0 )); then
+    echo "human-reject: timed out before second ${approve_when}" >&2
+    return 1
+  fi
+  echo "waiting for second ${approve_when} before approve (up to ${remaining}s)..." >&2
+  if ! status="$(wait_for_expected_task_status "${trace_id}" "${task_id}" "${approve_when}" "${remaining}")"; then
+    echo "human-reject: second gate status=${status}, want ${approve_when}" >&2
+    return 1
+  fi
+
+  remaining=$(( timeout_secs - ($(date +%s) - start) ))
+  (( remaining < 30 )) && remaining=30
+  gate_wait="${remaining}"
+  (( gate_wait > 120 )) && gate_wait=120
+  echo "waiting for post-rework verification.success before approve (up to ${gate_wait}s)..." >&2
+  post_start=$(date +%s)
+  while true; do
+    if replay_has_verification_after_feedback "$(collect_replay_lines "${trace_id}")"; then
+      echo "replay has post-rework verification.success" >&2
+      break
+    fi
+    if (( $(date +%s) - post_start >= gate_wait )); then
+      echo "human-reject: post-rework verification.success not seen; approving anyway" >&2
+      break
+    fi
+    sleep 1
+  done
+
+  remaining=$(( timeout_secs - ($(date +%s) - start) ))
+  if (( remaining <= 0 )); then
+    echo "human-reject: timed out before approve" >&2
+    return 1
+  fi
+  operator_approve_proposal "${trace_id}" "${task_id}" "${summary}"
+
+  remaining=$(( timeout_secs - ($(date +%s) - start) ))
+  (( remaining < 30 )) && remaining=30
+  if ! status="$(wait_for_success_scoring "${case_id}" "${trace_id}" "${task_id}" "${expect_status}" "${remaining}")"; then
+    echo "human-reject: final status=${status}, want ${expect_status} with oracle pass" >&2
+    echo "${status}"
+    return 1
+  fi
+  echo "${status}"
+  return 0
 }
 
 # check_kill_oracle asserts hard stop while honey remains: cancelled task, optional

@@ -1,0 +1,38 @@
+id: 06-human-reject
+trace: eval-06-human-reject
+seed: seed/
+task:
+  title: "Add sum(a, b) with human reject"
+  body: |
+    Implement Sum in the seeded package so tests pass.
+  bee: builder
+  intent: test-fix
+  review: required
+fault:
+  mode: first_pass
+operator:
+  # Soft HITL: reject first waiting_review, then approve after builder rework.
+  reject_when: waiting_review
+  feedback: "eval: please revise"
+  approve_when: waiting_review
+  summary: "eval: approved after revise"
+oracle:
+  command: "go test ./pkg/..."
+  workdir: "."
+  max_rework_cycles: 1
+  expect_event_chain:
+    - type: MUTATION
+      kind: code.proposal.isolated
+    - type: VERIFICATION
+      kind: verification.success
+    - type: INSIGHT
+      kind: human.feedback
+    - type: MUTATION
+      kind: code.proposal.isolated
+    - type: VERIFICATION
+      kind: verification.success
+score:
+  must_pass_tests: true
+  expect_task_status: completed
+  max_builder_runs: 2
+timeout: 10m

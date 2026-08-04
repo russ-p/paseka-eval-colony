@@ -56,6 +56,15 @@ elif [[ "${fault_mode}" == "first_pass" || "${fault_mode}" == "inject-mutation" 
   # first_pass: correct on run 1. inject-mutation: builder never ran for v1;
   # verification.failed is the first dispatch, so apply expect/ (not broken/).
   apply_expect
+  # After HITL reject, identical expect/ is a no-op — nudge a comment so the
+  # runtime re-emits code.proposal.isolated for the second AFK pass.
+  if [[ "${fault_mode}" == "first_pass" && "${runs}" -gt 1 && -f "${workspace}/pkg/calc/calc.go" ]]; then
+    if ! grep -q 'revised after human.feedback' "${workspace}/pkg/calc/calc.go"; then
+      sed -i 's|// Sum returns a + b\.|// Sum returns a + b (revised after human.feedback).|' \
+        "${workspace}/pkg/calc/calc.go"
+      echo "eval builder: nudged expect comment for rework proposal (run ${runs})"
+    fi
+  fi
 elif [[ "${runs}" -eq 1 ]]; then
   apply_broken
 else

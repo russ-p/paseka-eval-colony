@@ -420,6 +420,51 @@ worktree_for_trace() {
   echo "${EVAL_ROOT}/.paseka/worktrees/${trace_id}"
 }
 
+# ensure_inject_worktree creates the platform worktree path and applies broken/
+# so guard sees bad code on disk when the runner signals MUTATION.
+ensure_inject_worktree() {
+  local case_id="$1"
+  local trace_id="$2"
+  local case_dir wt branch
+  case_dir="$(case_dir_for "${case_id}")"
+  wt="$(worktree_for_trace "${trace_id}")"
+  branch="paseka/${trace_id}"
+
+  mkdir -p "$(dirname "${wt}")"
+  if [[ ! -d "${wt}" ]]; then
+    echo "creating inject worktree at ${wt}..."
+    if ! git -C "${EVAL_ROOT}" worktree add -b "${branch}" "${wt}" HEAD; then
+      # Branch may linger after a partial reset; attach without -b.
+      git -C "${EVAL_ROOT}" worktree add "${wt}" "${branch}" 2>/dev/null \
+        || git -C "${EVAL_ROOT}" worktree add "${wt}" HEAD
+    fi
+  fi
+
+  if [[ -d "${case_dir}/broken/pkg" ]]; then
+    rsync -a "${case_dir}/broken/pkg/" "${wt}/pkg/"
+    echo "applied broken/ into inject worktree"
+  elif [[ -f "${case_dir}/broken/bad.patch" ]]; then
+    (cd "${wt}" && patch -p1 < "${case_dir}/broken/bad.patch")
+    echo "applied broken patch into inject worktree"
+  else
+    echo "inject-mutation: missing broken/ fixture in ${case_dir}" >&2
+    return 1
+  fi
+}
+
+publish_injected_mutation() {
+  local trace_id="$1"
+  local task_id="$2"
+  local payload
+  payload="$(printf '{"kind":"code.proposal.isolated","taskId":"%s","summary":"injected broken proposal"}' "${task_id}")"
+  echo "publishing injected MUTATION/code.proposal.isolated for task ${task_id}..."
+  paseka signal \
+    --type MUTATION \
+    --trace "${trace_id}" \
+    --payload "${payload}" \
+    -C "${EVAL_ROOT}"
+}
+
 run_oracle() {
   local case_id="$1"
   local trace_id="$2"

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Scripted eval builder: apply broken/expect trees per fault mode.
-# Modes: scripted (broken then expect), always_broken, first_pass (expect on run 1).
+# Modes: scripted (broken then expect), always_broken, first_pass (expect on run 1),
+# inject-mutation (expect on first builder run — runner injected the broken proposal).
 set -euo pipefail
 
 root="${PASEKA_COLONY_ROOT:?missing PASEKA_COLONY_ROOT}"
@@ -51,7 +52,9 @@ apply_expect() {
 
 if [[ "${fault_mode}" == "always_broken" ]]; then
   apply_broken
-elif [[ "${fault_mode}" == "first_pass" ]]; then
+elif [[ "${fault_mode}" == "first_pass" || "${fault_mode}" == "inject-mutation" ]]; then
+  # first_pass: correct on run 1. inject-mutation: builder never ran for v1;
+  # verification.failed is the first dispatch, so apply expect/ (not broken/).
   apply_expect
 elif [[ "${runs}" -eq 1 ]]; then
   apply_broken

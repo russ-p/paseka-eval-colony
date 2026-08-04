@@ -24,6 +24,7 @@ title="$(read_case_field "${case_id}" task_title)"
 bee="$(read_case_field "${case_id}" task_bee)"
 intent="$(read_case_field "${case_id}" task_intent)"
 review="$(read_case_field "${case_id}" task_review)"
+fault_mode="$(read_case_field "${case_id}" fault_mode)"
 timeout_raw="$(read_case_field "${case_id}" timeout)"
 timeout_secs="$(timeout_seconds "${timeout_raw}")"
 must_pass_tests="$(read_case_field "${case_id}" score_must_pass_tests)"
@@ -55,22 +56,31 @@ ensure_nats
 ensure_runtime
 
 echo "creating task on trace ${trace}..."
-create_out="$(
-  paseka task create \
-    --trace "${trace}" \
-    --title "${title}" \
-    --file "${task_body_file}" \
-    --bee "${bee}" \
-    --intent "${intent}" \
-    --review "${review}" \
-    --autorun \
-    -C "${EVAL_ROOT}" 2>&1
-)"
+create_args=(
+  task create
+  --trace "${trace}"
+  --title "${title}"
+  --file "${task_body_file}"
+  --bee "${bee}"
+  --intent "${intent}"
+  --review "${review}"
+  -C "${EVAL_ROOT}"
+)
+# inject-mutation: skip builder v1 (no task.ready); runner injects the bad proposal.
+if [[ "${fault_mode}" != "inject-mutation" ]]; then
+  create_args+=(--autorun)
+fi
+create_out="$(paseka "${create_args[@]}" 2>&1)"
 echo "${create_out}"
 task_id="$(echo "${create_out}" | awk '/^  task:/{print $2}')"
 if [[ -z "${task_id}" ]]; then
   echo "failed to parse task id from paseka task create output" >&2
   exit 1
+fi
+
+if [[ "${fault_mode}" == "inject-mutation" ]]; then
+  ensure_inject_worktree "${case_id}" "${trace}"
+  publish_injected_mutation "${trace}" "${task_id}"
 fi
 
 if [[ "${must_pass_tests}" == "true" && -z "${expect_task_status}" ]]; then

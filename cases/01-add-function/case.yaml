@@ -17,11 +17,11 @@ oracle:
   max_rework_cycles: 2
   expect_event_chain:
     - type: MUTATION
-      kind: code.proposal
+      kind: code.proposal.isolated
     - type: VERIFICATION
       kind: verification.failed
     - type: MUTATION
-      kind: code.proposal
+      kind: code.proposal.isolated
     - type: VERIFICATION
       kind: verification.success
 score:

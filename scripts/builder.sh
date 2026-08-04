@@ -52,4 +52,4 @@ else
   fi
 fi
 
-# Runtime auto-publishes MUTATION/code.proposal from git diff when declared in bee YAML.
+# Runtime auto-publishes MUTATION/code.proposal.isolated from git diff when declared in bee YAML.

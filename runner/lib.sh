@@ -356,9 +356,11 @@ wait_for_success_scoring() {
     if [[ -z "${status}" ]]; then
       status="missing"
     fi
-    if [[ "${status}" == "${expect_status}" ]] && run_oracle "${case_id}" "${trace_id}"; then
-      echo "${status}"
-      return 0
+    if [[ "${status}" == "${expect_status}" ]]; then
+      if run_oracle "${case_id}" "${trace_id}" >/dev/null; then
+        echo "${status}"
+        return 0
+      fi
     fi
     now=$(date +%s)
     if (( now - start >= timeout_secs )); then

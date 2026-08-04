@@ -30,7 +30,7 @@ paseka init                              # idempotent
 
 - **Commit script and seed changes** — worktrees are created from `HEAD`; uncommitted `scripts/` or root `go.mod`/`pkg/` are invisible to bees.
 - **Runner must use `-C`** — all `paseka` calls from `runner/` pass `-C "${EVAL_ROOT}"` so purge/task/replay target this colony, not a parent repo.
-- **Bus reset via purge** — `runner/reset.sh` stops `paseka run`, then `paseka purge --bus --trace <trace>` clears JetStream state for the case trace (no NATS container restart).
+- **Bus reset via purge** — `runner/reset.sh` stops `paseka run`, applies case `energy.budget` to colony defaults when set, then `paseka purge --runs --worktrees --state --bus --trace <trace> --reseed-energy` clears JetStream state and reseeds honey (no NATS container restart).
 - **Script bees emit with colony root** — `paseka event emit --stdin -C "${PASEKA_COLONY_ROOT}"` (worktree cwd breaks home-config resolution).
 - **Materialized seed is committed** — `runner/reset.sh` copies `cases/<id>/seed/` to repo root and commits `seedSha` before worktree creation.
 - **Score the oracle, not task status alone** — with `review: none`, runtime may mark the task `completed` before guard→builder rework finishes; `run-case.sh` polls worktree tests.

@@ -6,7 +6,7 @@ Tier B harness for the eval colony.
 
 | Script | Purpose |
 | ------ | ------- |
-| `reset.sh <case-id>` | Purge ephemeral colony state, materialize `cases/<id>/seed/` to repo root, commit seed SHA |
+| `reset.sh <case-id>` | Purge ephemeral colony state (`--bus --reseed-energy`), materialize `cases/<id>/seed/` to repo root, commit seed SHA |
 | `run-case.sh <case-id>` | Full case: reset → `paseka task create --autorun` → wait → oracle → JSON report |
 
 Requires `paseka` on `PATH`, NATS (`paseka doctor`), and Go for oracle commands.

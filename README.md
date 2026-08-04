@@ -36,4 +36,4 @@ Tier A evals live in the Paseka platform repo (`internal/runtime` tests).
 | ---- | ----- | ---------- | ------ |
 | `01-add-function` | `eval-01-add-function` | `scripted` | `go test ./...` |
 
-Reset model: `runner/reset.sh` purges ephemeral state, copies `cases/<id>/seed/` to repo root, commits `seedSha`, uses fixed `--trace` from `case.yaml`.
+Reset model: `runner/reset.sh` purges ephemeral state with `--reseed-energy`, copies `cases/<id>/seed/` to repo root, commits `seedSha`, uses fixed `--trace` from `case.yaml`.

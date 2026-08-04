@@ -170,7 +170,9 @@ timeout_seconds() {
 
 purge_colony() {
   local trace_id="$1"
-  paseka purge --runs --worktrees --state --bus --trace "${trace_id}" --yes -C "${EVAL_ROOT}"
+  # --reseed-energy restores honey to colony defaults.energy_budget after bus wipe
+  # (see paseka backlog "Trace reset helper"). Apply case budget overrides before calling.
+  paseka purge --runs --worktrees --state --bus --trace "${trace_id}" --reseed-energy --yes -C "${EVAL_ROOT}"
   git -C "${EVAL_ROOT}" worktree prune >/dev/null 2>&1 || true
   while IFS= read -r branch; do
     [[ -z "${branch}" ]] && continue
@@ -255,11 +257,12 @@ reset_case() {
   energy_budget="$(read_case_field "$case_id" energy_budget)"
   energy_topup="$(read_case_field "$case_id" energy_topup)"
   stop_runtime
-  purge_colony "${trace_id}"
+  # Case energy_budget must be on colony.yaml before purge --reseed-energy.
   restore_colony_config
   if [[ -n "${energy_budget}" ]]; then
     set_colony_energy_budget "${energy_budget}"
   fi
+  purge_colony "${trace_id}"
   materialize_seed "$case_id"
   echo "${fault_mode}" > "${EVAL_META_DIR}/fault-mode"
   if [[ "${energy_topup}" =~ ^[0-9]+$ ]] && (( energy_topup > 0 )); then

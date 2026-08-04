@@ -687,7 +687,7 @@ operator_reject_proposal() {
     args+=(--feedback "${feedback}")
   fi
   echo "operator reject: paseka ${args[*]}" >&2
-  paseka "${args[@]}"
+  paseka "${args[@]}" >&2
 }
 
 operator_approve_proposal() {
@@ -704,7 +704,7 @@ operator_approve_proposal() {
     args+=(--summary "${summary}")
   fi
   echo "operator approve: paseka ${args[*]}" >&2
-  paseka "${args[@]}"
+  paseka "${args[@]}" >&2
 }
 
 # replay_has_verification_after_feedback exits 0 when VERIFICATION/verification.success

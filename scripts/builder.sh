@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Scripted eval builder: apply broken tree on first run, expect/ fix on rework.
+# Scripted eval builder: apply broken/expect trees per fault mode.
+# Modes: scripted (broken then expect), always_broken, first_pass (expect on run 1).
 set -euo pipefail
 
 root="${PASEKA_COLONY_ROOT:?missing PASEKA_COLONY_ROOT}"
@@ -38,18 +39,24 @@ apply_broken() {
   fi
 }
 
-if [[ "${fault_mode}" == "always_broken" ]]; then
-  apply_broken
-elif [[ "${runs}" -eq 1 ]]; then
-  apply_broken
-else
+apply_expect() {
   if [[ -d "${case_dir}/expect" ]]; then
     rsync -a "${case_dir}/expect/" "${workspace}/"
     echo "eval builder: applied expect/ tree (run ${runs})"
   else
-    echo "eval builder: no expect/ directory for rework run ${runs}" >&2
+    echo "eval builder: no expect/ directory for run ${runs}" >&2
     exit 1
   fi
+}
+
+if [[ "${fault_mode}" == "always_broken" ]]; then
+  apply_broken
+elif [[ "${fault_mode}" == "first_pass" ]]; then
+  apply_expect
+elif [[ "${runs}" -eq 1 ]]; then
+  apply_broken
+else
+  apply_expect
 fi
 
 # Runtime auto-publishes MUTATION/code.proposal.isolated from git diff when declared in bee YAML.

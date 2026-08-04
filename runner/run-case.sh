@@ -29,6 +29,8 @@ timeout_raw="$(read_case_field "${case_id}" timeout)"
 timeout_secs="$(timeout_seconds "${timeout_raw}")"
 must_pass_tests="$(read_case_field "${case_id}" score_must_pass_tests)"
 expect_task_status="$(read_case_field "${case_id}" score_expect_task_status)"
+kill_after="$(read_case_field "${case_id}" operator_kill_after)"
+kill_reason="$(read_case_field "${case_id}" operator_kill_reason)"
 task_body_file="$(case_dir_for "${case_id}")/task.body"
 
 if [[ -z "${title}" ]]; then
@@ -89,7 +91,28 @@ fi
 
 echo "waiting for hive loop + oracle (timeout ${timeout_secs}s)..."
 oracle_ok=false
-if [[ "${must_pass_tests}" == "false" ]]; then
+if [[ -n "${kill_after}" ]]; then
+  # Operator kill path (e.g. 05-kill-cancel): wait for activity, hard-stop, score cancelled + honey left.
+  activity_wait="${timeout_secs}"
+  if (( timeout_secs > 60 )); then
+    activity_wait=60
+  fi
+  echo "waiting for hive activity before kill (up to ${activity_wait}s)..."
+  if ! wait_for_hive_activity "${trace}" "${task_id}" "${activity_wait}"; then
+    echo "hive activity wait failed; proceeding to kill anyway" >&2
+  fi
+  operator_kill_trace "${trace}" "${kill_reason}"
+  remaining_timeout=$(( timeout_secs ))
+  if [[ -n "${expect_task_status}" ]]; then
+    task_status="$(wait_for_expected_task_status "${trace}" "${task_id}" "${expect_task_status}" "${remaining_timeout}")" || true
+  else
+    task_status="$(wait_for_terminal_task "${trace}" "${task_id}" "${remaining_timeout}")" || true
+  fi
+  replay_out="$(collect_replay_lines "${trace}")"
+  if check_kill_oracle "${case_id}" "${trace}" "${task_id}" "${replay_out}"; then
+    oracle_ok=true
+  fi
+elif [[ "${must_pass_tests}" == "false" ]]; then
   if [[ -n "${expect_task_status}" ]]; then
     task_status="$(wait_for_expected_task_status "${trace}" "${task_id}" "${expect_task_status}" "${timeout_secs}")" || true
   else
@@ -98,6 +121,7 @@ if [[ "${must_pass_tests}" == "false" ]]; then
   if check_energy_exhaustion_oracle "${case_id}" "${trace}" "${task_id}"; then
     oracle_ok=true
   fi
+  replay_out="$(collect_replay_lines "${trace}")"
 else
   if ! task_status="$(wait_for_success_scoring "${case_id}" "${trace}" "${task_id}" "${expect_task_status}" "${timeout_secs}")"; then
     task_status="${task_status:-timeout}"
@@ -107,9 +131,13 @@ else
   else
     oracle_ok=true
   fi
+  replay_out="$(collect_replay_lines "${trace}")"
 fi
 
-replay_out="$(collect_replay_lines "${trace}")"
+# Kill path already collected replay for oracle; others collect above.
+if [[ -z "${replay_out:-}" ]]; then
+  replay_out="$(collect_replay_lines "${trace}")"
+fi
 wall_end=$(date +%s)
 duration=$(( wall_end - wall_start ))
 
@@ -119,7 +147,11 @@ if check_replay_event_chain "${case_id}" "${replay_out}"; then
 fi
 
 passed=false
-if [[ "${must_pass_tests}" == "false" ]]; then
+if [[ -n "${kill_after}" ]]; then
+  if [[ "${oracle_ok}" == "true" && "${task_status}" == "${expect_task_status}" && "${event_chain_ok}" == "true" ]]; then
+    passed=true
+  fi
+elif [[ "${must_pass_tests}" == "false" ]]; then
   if [[ "${oracle_ok}" == "true" && "${task_status}" == "${expect_task_status}" ]]; then
     passed=true
   fi

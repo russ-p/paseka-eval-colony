@@ -1,0 +1,33 @@
+id: 05-kill-cancel
+trace: eval-05-kill-cancel
+seed: seed/
+task:
+  title: "Add sum(a, b) then operator kill"
+  body: |
+    Implement Sum in the seeded package so tests pass.
+  bee: builder
+  intent: test-fix
+  review: none
+fault:
+  mode: always_broken
+# Healthy honey so kill is not confused with energy exhaustion (case 02).
+energy:
+  budget: 12
+  topup: 0
+operator:
+  # Wait until script builder has started at least one run, then hard-kill.
+  kill_after: activity
+  reason: "eval hard stop"
+oracle:
+  command: "go test ./..."
+  workdir: "."
+  expect_event_chain:
+    - type: SIGNAL
+      kind: system.kill
+score:
+  must_pass_tests: false
+  expect_task_status: cancelled
+  expect_summary: "eval hard stop"
+  expect_trace_killed: true
+  expect_energy_remaining_gt: 0
+timeout: 3m

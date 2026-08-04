@@ -87,6 +87,14 @@ elif field == "score_expect_task_status":
     print(nested("score", "expect_task_status") or "")
 elif field == "score_expect_summary":
     print(nested("score", "expect_summary") or "")
+elif field == "score_expect_trace_killed":
+    print(nested("score", "expect_trace_killed") or "")
+elif field == "score_expect_energy_remaining_gt":
+    print(nested("score", "expect_energy_remaining_gt") or "")
+elif field == "operator_kill_after":
+    print(nested("operator", "kill_after") or "")
+elif field == "operator_kill_reason":
+    print(nested("operator", "reason") or "")
 else:
     raise SystemExit(f"unknown field: {field}")
 PY
@@ -394,8 +402,8 @@ wait_for_terminal_task() {
       last_status="${status}"
       unchanged_since=$(date +%s)
     fi
-    case "${status}" in
-      completed|failed|blocked|waiting_review)
+      case "${status}" in
+      completed|failed|blocked|waiting_review|cancelled)
         echo "${status}"
         return 0
         ;;
@@ -558,6 +566,96 @@ check_energy_exhaustion_oracle() {
   if [[ -n "${expect_summary}" && "${summary}" != "${expect_summary}" ]]; then
     echo "energy oracle: summary=${summary@Q}, want ${expect_summary@Q}" >&2
     return 1
+  fi
+  return 0
+}
+
+# wait_for_hive_activity blocks until the script builder has started (builder-runs >= 1)
+# or the task is visibly non-idle — used before operator kill so the loop is in flight.
+wait_for_hive_activity() {
+  local trace_id="$1"
+  local task_id="$2"
+  local timeout_secs="$3"
+  local start now runs status
+  start=$(date +%s)
+  while true; do
+    runs=0
+    if [[ -f "${EVAL_META_DIR}/builder-runs" ]]; then
+      runs="$(cat "${EVAL_META_DIR}/builder-runs")"
+    fi
+    if [[ "${runs}" =~ ^[0-9]+$ ]] && (( runs >= 1 )); then
+      echo "builder-runs=${runs}"
+      return 0
+    fi
+    status="$(task_show_field "${trace_id}" "${task_id}" status)"
+    case "${status}" in
+      running|waiting_review|blocked)
+        echo "task-status=${status}"
+        return 0
+        ;;
+    esac
+    now=$(date +%s)
+    if (( now - start >= timeout_secs )); then
+      echo "timeout (builder-runs=${runs} status=${status:-missing})" >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+operator_kill_trace() {
+  local trace_id="$1"
+  local reason="$2"
+  local args=(kill --trace "${trace_id}" -C "${EVAL_ROOT}")
+  if [[ -n "${reason}" ]]; then
+    args+=(--reason "${reason}")
+  fi
+  echo "operator kill: paseka ${args[*]}"
+  paseka "${args[@]}"
+}
+
+# check_kill_oracle asserts hard stop while honey remains: cancelled task, optional
+# reason summary, remaining energy > threshold, and SIGNAL/system.kill in replay.
+check_kill_oracle() {
+  local case_id="$1"
+  local trace_id="$2"
+  local task_id="$3"
+  local replay_out="${4:-}"
+  local expect_status expect_summary expect_killed min_remaining remaining status summary
+  expect_status="$(read_case_field "$case_id" score_expect_task_status)"
+  expect_summary="$(read_case_field "$case_id" score_expect_summary)"
+  expect_killed="$(read_case_field "$case_id" score_expect_trace_killed)"
+  min_remaining="$(read_case_field "$case_id" score_expect_energy_remaining_gt)"
+  [[ -z "${min_remaining}" ]] && min_remaining="0"
+
+  remaining="$(energy_show_field "${trace_id}" remaining)"
+  status="$(task_show_field "${trace_id}" "${task_id}" status)"
+  summary="$(task_show_field "${trace_id}" "${task_id}" summary)"
+
+  if [[ -z "${remaining}" ]] || ! [[ "${remaining}" =~ ^[0-9]+$ ]]; then
+    echo "kill oracle: remaining=${remaining@Q}, want integer > ${min_remaining}" >&2
+    return 1
+  fi
+  if (( remaining <= min_remaining )); then
+    echo "kill oracle: remaining=${remaining}, want > ${min_remaining} (honey must remain)" >&2
+    return 1
+  fi
+  if [[ -n "${expect_status}" && "${status}" != "${expect_status}" ]]; then
+    echo "kill oracle: status=${status}, want ${expect_status}" >&2
+    return 1
+  fi
+  if [[ -n "${expect_summary}" && "${summary}" != "${expect_summary}" ]]; then
+    echo "kill oracle: summary=${summary@Q}, want ${expect_summary@Q}" >&2
+    return 1
+  fi
+  if [[ "${expect_killed}" == "true" ]]; then
+    if [[ -z "${replay_out}" ]]; then
+      replay_out="$(collect_replay_lines "${trace_id}")"
+    fi
+    if ! echo "${replay_out}" | grep -qE 'SIGNAL[[:space:]]+\(system\.kill\)'; then
+      echo "kill oracle: replay missing SIGNAL/system.kill" >&2
+      return 1
+    fi
   fi
   return 0
 }

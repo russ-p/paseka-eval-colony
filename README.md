@@ -26,6 +26,7 @@ docker compose -f ../paseka/docker-compose.yml up -d nats
 # from this repo root
 paseka init          # idempotent
 ./runner/run-case.sh 01-add-function
+./runner/run-all.sh
 ```
 
 Tier A evals live in the Paseka platform repo (`internal/runtime` tests).

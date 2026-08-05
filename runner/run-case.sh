@@ -20,6 +20,7 @@ fi
 require_case "${case_id}"
 
 trace="$(read_case_field "${case_id}" trace)"
+ingress_mode="$(read_case_field "${case_id}" ingress_mode)"
 title="$(read_case_field "${case_id}" task_title)"
 bee="$(read_case_field "${case_id}" task_bee)"
 intent="$(read_case_field "${case_id}" task_intent)"
@@ -34,7 +35,7 @@ kill_reason="$(read_case_field "${case_id}" operator_kill_reason)"
 reject_when="$(read_case_field "${case_id}" operator_reject_when)"
 task_body_file="$(case_dir_for "${case_id}")/task.body"
 
-if [[ -z "${title}" ]]; then
+if [[ "${ingress_mode}" != "cue" && -z "${title}" ]]; then
   echo "case ${case_id}: task.title missing in case.yaml" >&2
   exit 1
 fi
@@ -58,27 +59,47 @@ reset_case "${case_id}"
 ensure_nats
 ensure_runtime
 
-echo "creating task on trace ${trace}..."
-create_args=(
-  task create
-  --trace "${trace}"
-  --title "${title}"
-  --file "${task_body_file}"
-  --bee "${bee}"
-  --intent "${intent}"
-  --review "${review}"
-  -C "${EVAL_ROOT}"
-)
-# inject-mutation: skip builder v1 (no task.ready); runner injects the bad proposal.
-if [[ "${fault_mode}" != "inject-mutation" ]]; then
-  create_args+=(--autorun)
-fi
-create_out="$(paseka "${create_args[@]}" 2>&1)"
-echo "${create_out}"
-task_id="$(echo "${create_out}" | awk '/^  task:/{print $2}')"
-if [[ -z "${task_id}" ]]; then
-  echo "failed to parse task id from paseka task create output" >&2
-  exit 1
+if [[ "${ingress_mode}" == "cue" ]]; then
+  cue_id="$(read_case_field "${case_id}" ingress_cue_id)"
+  if [[ -z "${cue_id}" ]]; then
+    echo "case ${case_id}: ingress.id missing in case.yaml" >&2
+    exit 1
+  fi
+  cue_text="$(tr -d '\n' < "${task_body_file}" | sed 's/[[:space:]]*$//')"
+  echo "running cue ${cue_id} on trace ${trace}..."
+  cue_out="$(paseka cue run "${cue_id}" "${cue_text}" --trace "${trace}" -C "${EVAL_ROOT}" 2>&1)"
+  echo "${cue_out}"
+  task_id="$(echo "${cue_out}" | awk '/^Task:/{print $2}')"
+  if [[ -z "${task_id}" ]]; then
+    echo "failed to parse task id from paseka cue run output" >&2
+    exit 1
+  fi
+  if ! check_cue_energy_oracle "${case_id}" "${trace}"; then
+    exit 1
+  fi
+else
+  echo "creating task on trace ${trace}..."
+  create_args=(
+    task create
+    --trace "${trace}"
+    --title "${title}"
+    --file "${task_body_file}"
+    --bee "${bee}"
+    --intent "${intent}"
+    --review "${review}"
+    -C "${EVAL_ROOT}"
+  )
+  # inject-mutation: skip builder v1 (no task.ready); runner injects the bad proposal.
+  if [[ "${fault_mode}" != "inject-mutation" ]]; then
+    create_args+=(--autorun)
+  fi
+  create_out="$(paseka "${create_args[@]}" 2>&1)"
+  echo "${create_out}"
+  task_id="$(echo "${create_out}" | awk '/^  task:/{print $2}')"
+  if [[ -z "${task_id}" ]]; then
+    echo "failed to parse task id from paseka task create output" >&2
+    exit 1
+  fi
 fi
 
 if [[ "${fault_mode}" == "inject-mutation" ]]; then
@@ -158,6 +179,13 @@ if check_replay_event_chain "${case_id}" "${replay_out}"; then
   event_chain_ok=true
 fi
 
+cue_oracle_ok=true
+if [[ "${ingress_mode}" == "cue" ]]; then
+  if ! check_cue_task_oracle "${case_id}" "${trace}" "${task_id}"; then
+    cue_oracle_ok=false
+  fi
+fi
+
 passed=false
 if [[ -n "${kill_after}" ]]; then
   if [[ "${oracle_ok}" == "true" && "${task_status}" == "${expect_task_status}" && "${event_chain_ok}" == "true" ]]; then
@@ -172,7 +200,7 @@ elif [[ "${must_pass_tests}" == "false" ]]; then
     passed=true
   fi
 else
-  if [[ "${oracle_ok}" == "true" && "${task_status}" == "${expect_task_status}" && "${event_chain_ok}" == "true" ]]; then
+  if [[ "${oracle_ok}" == "true" && "${task_status}" == "${expect_task_status}" && "${event_chain_ok}" == "true" && "${cue_oracle_ok}" == "true" ]]; then
     passed=true
   fi
 fi

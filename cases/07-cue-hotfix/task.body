@@ -1,0 +1,1 @@
+Hotfix: Sum in the seeded calc package returns 0; implement correct a+b so tests pass.

@@ -15,7 +15,7 @@ runner/           reset + run-case harness (Tier B)
 
 ## Status
 
-Phase 2 — Tier B cases `01`–`06` (scripted loop, energy block, first-pass, inject-mutation, kill, human reject), script bees, reset + run-case runner.
+Phase 2 — Tier B cases `01`–`07` (scripted loop, energy block, first-pass, inject-mutation, kill, human reject, cue hotfix), script bees, reset + run-case runner.
 
 ## Quick start
 
@@ -40,5 +40,6 @@ Tier A evals live in the Paseka platform repo (`internal/runtime` tests).
 | `04-inject-mutation` | `eval-04-inject-mutation` | `inject-mutation` | runner signal → guard→builder |
 | `05-kill-cancel` | `eval-05-kill-cancel` | `always_broken` + kill | `cancelled`, honey remains |
 | `06-human-reject` | `eval-06-human-reject` | `first_pass` + HITL | reject → rework → approve |
+| `07-cue-hotfix` | `eval-07-cue-hotfix` | `first_pass` + cue ingress | `cue run hotfix` → bee/intent/budget → tests pass |
 
-Reset model: `runner/reset.sh` purges ephemeral state with `--reseed-energy`, copies `cases/<id>/seed/` to repo root, commits `seedSha`, uses fixed `--trace` from `case.yaml`.
+Reset model: `runner/reset.sh` purges ephemeral state (with `--reseed-energy` for task ingress; without for cue ingress), copies `cases/<id>/seed/` to repo root, commits `seedSha`, uses fixed `--trace` from `case.yaml`.

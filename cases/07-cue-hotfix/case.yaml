@@ -1,0 +1,31 @@
+id: 07-cue-hotfix
+trace: eval-07-cue-hotfix
+seed: seed/
+ingress:
+  mode: cue
+  id: hotfix
+task:
+  review: none
+fault:
+  mode: first_pass
+energy:
+  topup: 0
+oracle:
+  command: "go test ./pkg/..."
+  workdir: "."
+  expect_event_chain:
+    - type: INSIGHT
+      kind: task.plan
+    - type: SIGNAL
+      kind: task.ready
+    - type: MUTATION
+      kind: code.proposal.isolated
+    - type: VERIFICATION
+      kind: verification.success
+score:
+  must_pass_tests: true
+  expect_task_status: completed
+  expect_bee: builder
+  expect_intent: bugfix
+  expect_energy_budget_lte: 3
+timeout: 10m

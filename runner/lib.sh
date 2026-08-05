@@ -71,6 +71,16 @@ elif field == "task_intent":
     print(nested("task", "intent") or "test-fix")
 elif field == "task_review":
     print(nested("task", "review") or "none")
+elif field == "ingress_mode":
+    print(nested("ingress", "mode") or "task")
+elif field == "ingress_cue_id":
+    print(nested("ingress", "id") or "")
+elif field == "score_expect_bee":
+    print(nested("score", "expect_bee") or "")
+elif field == "score_expect_intent":
+    print(nested("score", "expect_intent") or "")
+elif field == "score_expect_energy_budget_lte":
+    print(nested("score", "expect_energy_budget_lte") or "")
 elif field == "fault_mode":
     print(nested("fault", "mode") or "scripted")
 elif field == "fault_broken_diff":
@@ -186,9 +196,17 @@ timeout_seconds() {
 
 purge_colony() {
   local trace_id="$1"
+  local reseed="${2:-true}"
+  local purge_args=(
+    purge --runs --worktrees --state --bus --trace "${trace_id}" --yes -C "${EVAL_ROOT}"
+  )
   # --reseed-energy restores honey to colony defaults.energy_budget after bus wipe
   # (see paseka backlog "Trace reset helper"). Apply case budget overrides before calling.
-  paseka purge --runs --worktrees --state --bus --trace "${trace_id}" --reseed-energy --yes -C "${EVAL_ROOT}"
+  # Cue ingress cases skip reseed so cue run can seed its own energy_budget.
+  if [[ "${reseed}" == "true" ]]; then
+    purge_args+=(--reseed-energy)
+  fi
+  paseka "${purge_args[@]}"
   git -C "${EVAL_ROOT}" worktree prune >/dev/null 2>&1 || true
   while IFS= read -r branch; do
     [[ -z "${branch}" ]] && continue
@@ -269,18 +287,23 @@ restore_colony_config() {
 reset_case() {
   local case_id="$1"
   require_case "$case_id"
-  local trace_id fault_mode energy_budget energy_topup
+  local trace_id fault_mode energy_budget energy_topup ingress_mode
   trace_id="$(read_case_field "$case_id" trace)"
   fault_mode="$(read_case_field "$case_id" fault_mode)"
   energy_budget="$(read_case_field "$case_id" energy_budget)"
   energy_topup="$(read_case_field "$case_id" energy_topup)"
+  ingress_mode="$(read_case_field "$case_id" ingress_mode)"
   stop_runtime
   # Case energy_budget must be on colony.yaml before purge --reseed-energy.
   restore_colony_config
-  if [[ -n "${energy_budget}" ]]; then
+  if [[ -n "${energy_budget}" && "${ingress_mode}" != "cue" ]]; then
     set_colony_energy_budget "${energy_budget}"
   fi
-  purge_colony "${trace_id}"
+  if [[ "${ingress_mode}" == "cue" ]]; then
+    purge_colony "${trace_id}" false
+  else
+    purge_colony "${trace_id}" true
+  fi
   materialize_seed "$case_id"
   echo "${fault_mode}" > "${EVAL_META_DIR}/fault-mode"
   if [[ "${energy_topup}" =~ ^[0-9]+$ ]] && (( energy_topup > 0 )); then
@@ -539,6 +562,7 @@ task_show_field() {
   paseka task show --trace "${trace_id}" --task "${task_id}" -C "${EVAL_ROOT}" 2>/dev/null \
     | awk -v key="${field}" '
       $1 == "status:" && key == "status" { print $2; found=1 }
+      $1 == "bee:" && key == "bee" { print $2; found=1 }
       $1 == "summary:" && key == "summary" {
         sub(/^  summary:[[:space:]]*/, "")
         print $0
@@ -546,6 +570,76 @@ task_show_field() {
       }
       END { if (!found) print "" }
     '
+}
+
+colony_energy_budget() {
+  awk '/^[[:space:]]*energy_budget:[[:space:]]*[0-9]+/ {
+    sub(/^[[:space:]]*energy_budget:[[:space:]]*/, "")
+    print
+    exit
+  }' "${COLONY_CONFIG}" 2>/dev/null
+}
+
+task_projection_intent() {
+  local trace_id="$1"
+  local task_id="$2"
+  local task_md="${EVAL_ROOT}/.paseka/runs/${trace_id}/tasks/${task_id}/task.md"
+  if [[ ! -f "${task_md}" ]]; then
+    echo ""
+    return 0
+  fi
+  awk '/^intent:/{sub(/^intent:[[:space:]]*/, ""); print; exit}' "${task_md}"
+}
+
+check_cue_energy_oracle() {
+  local case_id="$1"
+  local trace_id="$2"
+  local max_budget budget colony_budget
+  max_budget="$(read_case_field "$case_id" score_expect_energy_budget_lte)"
+  budget="$(energy_show_field "${trace_id}" budget)"
+  colony_budget="$(colony_energy_budget)"
+
+  if [[ -z "${budget}" ]]; then
+    echo "cue energy oracle: no budget on trace" >&2
+    return 1
+  fi
+  if [[ -n "${max_budget}" && "${budget}" -gt "${max_budget}" ]]; then
+    echo "cue energy oracle: budget=${budget}, want <= ${max_budget}" >&2
+    return 1
+  fi
+  if [[ -n "${colony_budget}" && "${budget}" -ge "${colony_budget}" ]]; then
+    echo "cue energy oracle: budget=${budget}, want < colony default ${colony_budget} (likely reseeded before cue run)" >&2
+    return 1
+  fi
+  echo "cue energy oracle: budget=${budget} (colony default=${colony_budget})"
+  return 0
+}
+
+check_cue_task_oracle() {
+  local case_id="$1"
+  local trace_id="$2"
+  local task_id="$3"
+  local expect_bee expect_intent actual_bee actual_intent
+  expect_bee="$(read_case_field "$case_id" score_expect_bee)"
+  expect_intent="$(read_case_field "$case_id" score_expect_intent)"
+
+  if [[ -z "${expect_bee}" && -z "${expect_intent}" ]]; then
+    return 0
+  fi
+
+  actual_bee="$(task_show_field "${trace_id}" "${task_id}" bee)"
+  actual_intent="$(task_projection_intent "${trace_id}" "${task_id}")"
+
+  if [[ -n "${expect_bee}" && "${actual_bee}" != "${expect_bee}" ]]; then
+    echo "cue task oracle: bee=${actual_bee@Q}, want ${expect_bee@Q}" >&2
+    return 1
+  fi
+  if [[ -n "${expect_intent}" && "${actual_intent}" != "${expect_intent}" ]]; then
+    echo "cue task oracle: intent=${actual_intent@Q}, want ${expect_intent@Q}" >&2
+    return 1
+  fi
+  echo "cue task oracle: bee=${actual_bee}, intent=${actual_intent}"
+  return 0
 }
 
 check_energy_exhaustion_oracle() {

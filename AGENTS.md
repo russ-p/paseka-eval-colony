@@ -30,7 +30,7 @@ paseka init                              # idempotent
 
 - **Commit script and seed changes** — worktrees are created from `HEAD`; uncommitted `scripts/` or root `go.mod`/`pkg/` are invisible to bees.
 - **Runner must use `-C`** — all `paseka` calls from `runner/` pass `-C "${EVAL_ROOT}"` so purge/task/replay target this colony, not a parent repo.
-- **Bus reset via purge** — `runner/reset.sh` stops `paseka run`, applies case `energy.budget` to colony defaults when set, then `paseka purge --runs --worktrees --state --bus --trace <trace> --reseed-energy` clears JetStream state and reseeds honey (no NATS container restart).
+- **Bus reset via purge** — `runner/reset.sh` stops `paseka run`, applies case `energy.budget` to colony defaults when set, then `paseka purge --runs --worktrees --state --bus --trace <trace> --reseed-energy` clears JetStream state and reseeds honey (no NATS container restart). Cue ingress cases (`ingress.mode: cue`) skip `--reseed-energy` so `paseka cue run` can seed honey from the cue's `energy_budget`.
 - **Script bees emit with colony root** — `paseka event emit --stdin -C "${PASEKA_COLONY_ROOT}"` (worktree cwd breaks home-config resolution).
 - **Materialized seed is committed** — `runner/reset.sh` copies `cases/<id>/seed/` to repo root and commits `seedSha` before worktree creation.
 - **Score the oracle, not task status alone** — with `review: none`, runtime may mark the task `completed` before guard→builder rework finishes; `run-case.sh` polls worktree tests.
@@ -42,7 +42,7 @@ paseka init                              # idempotent
 2. `cases/<id>/seed/` — tiny baseline tree (usually `go.mod` + one package).
 3. `cases/<id>/broken/` — intentional bad fix for scripted fault injection.
 4. `cases/<id>/expect/` — correct tree for builder rework pass.
-5. `cases/<id>/task.body` — task text for `paseka task create --file`.
+5. `cases/<id>/task.body` — task text for `paseka task create --file`, or cue text for `paseka cue run` when `ingress.mode: cue`.
 
 Run: `./runner/run-case.sh <id>`.
 

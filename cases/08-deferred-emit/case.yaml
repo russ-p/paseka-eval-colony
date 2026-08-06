@@ -1,0 +1,34 @@
+id: 08-deferred-emit
+trace: eval-08-deferred-emit
+seed: seed/
+# Spec 015: script bee emits with --defer; success flushes before run.summary;
+# failed probe leaves pending for flush --discard (US 25).
+task:
+  title: "Add sum(a, b) with deferred emit"
+  body: |
+    Implement Sum in the seeded package so tests pass.
+  bee: builder
+  intent: test-fix
+  review: none
+fault:
+  mode: deferred_emit
+oracle:
+  command: "go test ./pkg/..."
+  workdir: "."
+  max_rework_cycles: 0
+  expect_event_chain:
+    # 015: deferred flush before synthesized run.summary (US 25).
+    # Runtime then auto-publishes code.proposal after run.summary in publishRunOutcome.
+    - type: INSIGHT
+      kind: context.note
+    - type: INSIGHT
+      kind: run.summary
+    - type: MUTATION
+      kind: code.proposal.isolated
+    - type: VERIFICATION
+      kind: verification.success
+score:
+  must_pass_tests: true
+  expect_task_status: completed
+  max_builder_runs: 1
+timeout: 10m

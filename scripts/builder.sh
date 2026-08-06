@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Scripted eval builder: apply broken/expect trees per fault mode.
 # Modes: scripted (broken then expect), always_broken, first_pass (expect on run 1),
-# inject-mutation (expect on first builder run — runner injected the broken proposal).
+# inject-mutation (expect on first builder run — runner injected the broken proposal),
+# deferred_emit (015: --defer context.note then expect; exit 0 → flush before run.summary),
+# deferred_fail (015: --defer then exit 1 → pending stays for flush --discard).
 set -euo pipefail
 
 root="${PASEKA_COLONY_ROOT:?missing PASEKA_COLONY_ROOT}"
@@ -50,7 +52,30 @@ apply_expect() {
   fi
 }
 
-if [[ "${fault_mode}" == "always_broken" ]]; then
+emit_deferred_note() {
+  local summary="$1"
+  local emit_out
+  emit_out="$(paseka event emit --defer --stdin -C "${root}" <<EOF
+{"traceId":"${PASEKA_TRACE_ID}","agentId":"${PASEKA_AGENT_ID}","type":"INSIGHT","payload":{"kind":"context.note","summary":"${summary}"}}
+EOF
+)"
+  echo "eval builder: deferred emit → ${emit_out}"
+  if ! echo "${emit_out}" | grep -q '"deferred":true'; then
+    echo "eval builder: expected deferred:true in emit response" >&2
+    exit 1
+  fi
+}
+
+if [[ "${fault_mode}" == "deferred_fail" ]]; then
+  emit_deferred_note "eval-08 deferred fail probe"
+  echo "eval builder: deferred_fail exiting 1 (pending must stay unpublished)" >&2
+  exit 1
+fi
+
+if [[ "${fault_mode}" == "deferred_emit" ]]; then
+  emit_deferred_note "eval-08 deferred success note"
+  apply_expect
+elif [[ "${fault_mode}" == "always_broken" ]]; then
   apply_broken
 elif [[ "${fault_mode}" == "first_pass" || "${fault_mode}" == "inject-mutation" ]]; then
   # first_pass: correct on run 1. inject-mutation: builder never ran for v1;

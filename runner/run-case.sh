@@ -59,6 +59,13 @@ reset_case "${case_id}"
 ensure_nats
 ensure_runtime
 
+if [[ "${fault_mode}" == "deferred_emit" ]]; then
+  if ! probe_deferred_fail_discard "${trace}"; then
+    echo "deferred emit fail/discard probe failed" >&2
+    exit 1
+  fi
+fi
+
 if [[ "${ingress_mode}" == "cue" ]]; then
   cue_id="$(read_case_field "${case_id}" ingress_cue_id)"
   if [[ -z "${cue_id}" ]]; then

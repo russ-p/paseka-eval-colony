@@ -7,6 +7,8 @@ EVAL_META_DIR="${EVAL_ROOT}/.eval"
 REPORTS_DIR="${EVAL_ROOT}/reports"
 COLONY_CONFIG="${EVAL_ROOT}/.paseka/colony.yaml"
 COLONY_CONFIG_BACKUP="${EVAL_META_DIR}/colony.yaml.bak"
+BUILDER_BEE="${EVAL_ROOT}/.paseka/bees/builder.yaml"
+BUILDER_BEE_BACKUP="${EVAL_META_DIR}/builder.yaml.bak"
 
 case_dir_for() {
   local case_id="$1"
@@ -282,6 +284,45 @@ restore_colony_config() {
     cp "${COLONY_CONFIG_BACKUP}" "${COLONY_CONFIG}"
     rm -f "${COLONY_CONFIG_BACKUP}"
   fi
+  restore_builder_bee
+}
+
+# enable_builder_run_summary lets 015 assert flush-before-run.summary on success.
+# Also points command at colony-root scripts/ so uncommitted builder.sh is visible
+# (worktrees checkout HEAD; relative ./scripts would miss local edits).
+# Registry is built at `paseka run` start — call before ensure_runtime.
+enable_builder_run_summary() {
+  mkdir -p "${EVAL_META_DIR}"
+  if [[ ! -f "${BUILDER_BEE_BACKUP}" ]]; then
+    cp "${BUILDER_BEE}" "${BUILDER_BEE_BACKUP}"
+  fi
+  python3 - "${BUILDER_BEE}" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+text = text.replace("run_summary: disabled", "run_summary: auto", 1)
+text = text.replace(
+    "command: ./scripts/builder.sh",
+    "command: ${COLONY_ROOT}/scripts/builder.sh",
+    1,
+)
+if "kind: run.summary" not in text:
+    needle = "  - type: MUTATION\n    kind: code.proposal.isolated\n"
+    insert = needle + "  - type: INSIGHT\n    kind: run.summary\n"
+    if needle not in text:
+        raise SystemExit("builder.yaml: expected code.proposal.isolated publish rule")
+    text = text.replace(needle, insert, 1)
+path.write_text(text)
+PY
+}
+
+restore_builder_bee() {
+  if [[ -f "${BUILDER_BEE_BACKUP}" ]]; then
+    cp "${BUILDER_BEE_BACKUP}" "${BUILDER_BEE}"
+    rm -f "${BUILDER_BEE_BACKUP}"
+  fi
 }
 
 reset_case() {
@@ -298,6 +339,9 @@ reset_case() {
   restore_colony_config
   if [[ -n "${energy_budget}" && "${ingress_mode}" != "cue" ]]; then
     set_colony_energy_budget "${energy_budget}"
+  fi
+  if [[ "${fault_mode}" == "deferred_emit" ]]; then
+    enable_builder_run_summary
   fi
   if [[ "${ingress_mode}" == "cue" ]]; then
     purge_colony "${trace_id}" false
@@ -504,6 +548,82 @@ publish_injected_mutation() {
     --trace "${trace_id}" \
     --payload "${payload}" \
     -C "${EVAL_ROOT}"
+}
+
+# probe_deferred_fail_discard: one-shot builder exits 1 after --defer; pending stays
+# off the bus; flush --discard clears the queue (015 fail path / US 25 companion).
+probe_deferred_fail_discard() {
+  local trace_id="$1"
+  local bee_out agent pending_json flush_out replay_out
+  local fail_summary="eval-08 deferred fail probe"
+
+  echo "deferred emit fail probe: bee run builder (exit 1 after --defer)..."
+  echo "deferred_fail" > "${EVAL_META_DIR}/fault-mode"
+  set +e
+  bee_out="$(paseka bee run builder --trace "${trace_id}" --body "${fail_summary}" -C "${EVAL_ROOT}" 2>&1)"
+  set -e
+  echo "${bee_out}"
+  agent="$(echo "${bee_out}" | awk '/^  agent:/{print $2; exit}')"
+  if [[ -z "${agent}" ]]; then
+    echo "deferred fail probe: failed to parse agent id from bee run output" >&2
+    echo "deferred_emit" > "${EVAL_META_DIR}/fault-mode"
+    return 1
+  fi
+
+  pending_json="$(paseka event pending --trace "${trace_id}" --agent "${agent}" -C "${EVAL_ROOT}")"
+  echo "pending after fail: ${pending_json}"
+  if ! PENDING_JSON="${pending_json}" python3 - <<'PY'
+import json, os, sys
+p = json.loads(os.environ["PENDING_JSON"])
+if not p.get("ok") or p.get("count") != 1 or "context.note" not in p.get("kinds", []):
+    print(f"want pending count=1 kinds=[context.note], got {p}", file=sys.stderr)
+    sys.exit(1)
+PY
+  then
+    echo "deferred_emit" > "${EVAL_META_DIR}/fault-mode"
+    return 1
+  fi
+
+  replay_out="$(collect_replay_lines "${trace_id}")"
+  if echo "${replay_out}" | grep -q "${fail_summary}"; then
+    echo "deferred fail probe: fail-probe note leaked onto bus before discard" >&2
+    echo "deferred_emit" > "${EVAL_META_DIR}/fault-mode"
+    return 1
+  fi
+  if echo "${replay_out}" | grep -E 'INSIGHT[[:space:]]+\(context\.note\)'; then
+    echo "deferred fail probe: context.note on bus before discard" >&2
+    echo "deferred_emit" > "${EVAL_META_DIR}/fault-mode"
+    return 1
+  fi
+
+  flush_out="$(paseka event flush --discard --trace "${trace_id}" --agent "${agent}" -C "${EVAL_ROOT}")"
+  echo "flush --discard: ${flush_out}"
+  pending_json="$(paseka event pending --trace "${trace_id}" --agent "${agent}" -C "${EVAL_ROOT}")"
+  echo "pending after discard: ${pending_json}"
+  if ! PENDING_JSON="${pending_json}" python3 - <<'PY'
+import json, os, sys
+p = json.loads(os.environ["PENDING_JSON"])
+if not p.get("ok") or p.get("count") != 0:
+    print(f"want pending count=0 after discard, got {p}", file=sys.stderr)
+    sys.exit(1)
+PY
+  then
+    echo "deferred_emit" > "${EVAL_META_DIR}/fault-mode"
+    return 1
+  fi
+
+  replay_out="$(collect_replay_lines "${trace_id}")"
+  if echo "${replay_out}" | grep -q "${fail_summary}"; then
+    echo "deferred fail probe: discard published the fail-probe note" >&2
+    echo "deferred_emit" > "${EVAL_META_DIR}/fault-mode"
+    return 1
+  fi
+
+  # Hive success path uses deferred_emit; reset builder-runs so scoring max_builder_runs=1.
+  echo "deferred_emit" > "${EVAL_META_DIR}/fault-mode"
+  echo "0" > "${EVAL_META_DIR}/builder-runs"
+  echo "deferred fail probe: pending discarded; continuing to success path"
+  return 0
 }
 
 run_oracle() {

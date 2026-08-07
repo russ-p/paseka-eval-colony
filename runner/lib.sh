@@ -107,6 +107,12 @@ elif field == "operator_kill_after":
     print(nested("operator", "kill_after") or "")
 elif field == "operator_kill_reason":
     print(nested("operator", "reason") or "")
+elif field == "operator_energy_add_after_kill":
+    print(nested("operator", "energy_add_after_kill") or "")
+elif field == "operator_settle_secs":
+    print(nested("operator", "settle_secs") or "")
+elif field == "score_expect_no_redispatch":
+    print(nested("score", "expect_no_redispatch") or "")
 elif field == "operator_reject_when":
     print(nested("operator", "reject_when") or "")
 elif field == "operator_reject_feedback":
@@ -836,6 +842,114 @@ operator_kill_trace() {
   fi
   echo "operator kill: paseka ${args[*]}"
   paseka "${args[@]}"
+}
+
+builder_runs_count() {
+  if [[ -f "${EVAL_META_DIR}/builder-runs" ]]; then
+    cat "${EVAL_META_DIR}/builder-runs"
+  else
+    echo "0"
+  fi
+}
+
+# Agent adapter runs live at .paseka/runs/<trace>/<agentId>/ (tasks/ is separate).
+count_trace_agent_run_dirs() {
+  local trace_id="$1"
+  local runs_dir="${EVAL_ROOT}/.paseka/runs/${trace_id}"
+  if [[ ! -d "${runs_dir}" ]]; then
+    echo "0"
+    return 0
+  fi
+  find "${runs_dir}" -mindepth 1 -maxdepth 1 -type d ! -name 'tasks' | wc -l | tr -d ' '
+}
+
+operator_energy_add_trace() {
+  local trace_id="$1"
+  local amount="$2"
+  local args=(energy add --trace "${trace_id}" --amount "${amount}" -C "${EVAL_ROOT}")
+  echo "operator energy add: paseka ${args[*]}"
+  paseka "${args[@]}"
+}
+
+# settle_no_redispatch polls builder-runs during the settle window; early fail on growth.
+settle_no_redispatch() {
+  local trace_id="$1"
+  local task_id="$2"
+  local runs_before="$3"
+  local settle_secs="$4"
+  local start now runs
+  start=$(date +%s)
+  while true; do
+    runs="$(builder_runs_count)"
+    if [[ "${runs}" =~ ^[0-9]+$ ]] && (( runs > runs_before )); then
+      echo "no-redispatch settle: builder-runs grew ${runs_before} -> ${runs}" >&2
+      return 1
+    fi
+    now=$(date +%s)
+    if (( now - start >= settle_secs )); then
+      echo "settle window complete (${settle_secs}s, builder-runs=${runs})"
+      return 0
+    fi
+    sleep 1
+  done
+}
+
+# check_no_redispatch_oracle asserts US4: energy.add after kill tops up honey without redispatch.
+check_no_redispatch_oracle() {
+  local case_id="$1"
+  local trace_id="$2"
+  local task_id="$3"
+  local runs_before="$4"
+  local remaining_before="$5"
+  local add_amount="$6"
+  local run_dirs_before="${7:-0}"
+  local expect_no_redispatch expect_status status runs remaining run_dirs_after want_remaining
+  expect_no_redispatch="$(read_case_field "$case_id" score_expect_no_redispatch)"
+  if [[ "${expect_no_redispatch}" != "true" ]]; then
+    return 0
+  fi
+
+  expect_status="$(read_case_field "$case_id" score_expect_task_status)"
+  status="$(task_show_field "${trace_id}" "${task_id}" status)"
+  if [[ -n "${expect_status}" && "${status}" != "${expect_status}" ]]; then
+    echo "no-redispatch oracle: status=${status}, want ${expect_status}" >&2
+    return 1
+  fi
+
+  runs="$(builder_runs_count)"
+  if [[ ! "${runs}" =~ ^[0-9]+$ ]]; then
+    echo "no-redispatch oracle: builder-runs=${runs@Q}, want integer" >&2
+    return 1
+  fi
+  if (( runs > runs_before )); then
+    echo "no-redispatch oracle: builder-runs grew ${runs_before} -> ${runs}" >&2
+    return 1
+  fi
+
+  remaining="$(energy_show_field "${trace_id}" remaining)"
+  if [[ -z "${remaining}" ]] || ! [[ "${remaining}" =~ ^[0-9]+$ ]]; then
+    echo "no-redispatch oracle: remaining=${remaining@Q}, want integer" >&2
+    return 1
+  fi
+  if [[ ! "${remaining_before}" =~ ^[0-9]+$ ]] || [[ ! "${add_amount}" =~ ^[0-9]+$ ]]; then
+    echo "no-redispatch oracle: invalid baseline remaining=${remaining_before} add=${add_amount}" >&2
+    return 1
+  fi
+  want_remaining=$(( remaining_before + add_amount ))
+  if (( remaining < want_remaining )); then
+    echo "no-redispatch oracle: remaining=${remaining}, want >= ${want_remaining} (before=${remaining_before} + add=${add_amount})" >&2
+    return 1
+  fi
+
+  run_dirs_after="$(count_trace_agent_run_dirs "${trace_id}")"
+  if [[ "${run_dirs_before}" =~ ^[0-9]+$ ]] && [[ "${run_dirs_after}" =~ ^[0-9]+$ ]]; then
+    if (( run_dirs_after > run_dirs_before )); then
+      echo "no-redispatch oracle: run dirs grew ${run_dirs_before} -> ${run_dirs_after}" >&2
+      return 1
+    fi
+  fi
+
+  return 0
 }
 
 # wait_for_replay_kind blocks until paseka replay shows TYPE (kind) for the trace.

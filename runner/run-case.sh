@@ -32,6 +32,8 @@ must_pass_tests="$(read_case_field "${case_id}" score_must_pass_tests)"
 expect_task_status="$(read_case_field "${case_id}" score_expect_task_status)"
 kill_after="$(read_case_field "${case_id}" operator_kill_after)"
 kill_reason="$(read_case_field "${case_id}" operator_kill_reason)"
+energy_add_after_kill="$(read_case_field "${case_id}" operator_energy_add_after_kill)"
+settle_secs_raw="$(read_case_field "${case_id}" operator_settle_secs)"
 reject_when="$(read_case_field "${case_id}" operator_reject_when)"
 task_body_file="$(case_dir_for "${case_id}")/task.body"
 
@@ -121,25 +123,58 @@ fi
 echo "waiting for hive loop + oracle (timeout ${timeout_secs}s)..."
 oracle_ok=false
 if [[ -n "${kill_after}" ]]; then
-  # Operator kill path (e.g. 05-kill-cancel): wait for activity, hard-stop, score cancelled + honey left.
+  # Operator kill path (05-kill-cancel smoke; 09-kill-no-redispatch US4 energy.add no-redispatch).
   activity_wait="${timeout_secs}"
   if (( timeout_secs > 60 )); then
     activity_wait=60
   fi
+  activity_required=false
+  if [[ "${energy_add_after_kill}" =~ ^[0-9]+$ ]] && (( energy_add_after_kill > 0 )); then
+    activity_required=true
+  fi
   echo "waiting for hive activity before kill (up to ${activity_wait}s)..."
+  activity_ok=true
   if ! wait_for_hive_activity "${trace}" "${task_id}" "${activity_wait}"; then
-    echo "hive activity wait failed; proceeding to kill anyway" >&2
+    if [[ "${activity_required}" == "true" ]]; then
+      echo "hive activity wait failed (required for energy_add_after_kill / US4)" >&2
+      activity_ok=false
+    else
+      echo "hive activity wait failed; proceeding to kill anyway" >&2
+    fi
   fi
-  operator_kill_trace "${trace}" "${kill_reason}"
-  remaining_timeout=$(( timeout_secs ))
-  if [[ -n "${expect_task_status}" ]]; then
-    task_status="$(wait_for_expected_task_status "${trace}" "${task_id}" "${expect_task_status}" "${remaining_timeout}")" || true
+  if [[ "${activity_ok}" == "true" ]]; then
+    operator_kill_trace "${trace}" "${kill_reason}"
+    remaining_timeout=$(( timeout_secs ))
+    if [[ -n "${expect_task_status}" ]]; then
+      task_status="$(wait_for_expected_task_status "${trace}" "${task_id}" "${expect_task_status}" "${remaining_timeout}")" || true
+    else
+      task_status="$(wait_for_terminal_task "${trace}" "${task_id}" "${remaining_timeout}")" || true
+    fi
+    replay_out="$(collect_replay_lines "${trace}")"
+    if check_kill_oracle "${case_id}" "${trace}" "${task_id}" "${replay_out}"; then
+      oracle_ok=true
+    fi
+    if [[ "${oracle_ok}" == "true" && "${energy_add_after_kill}" =~ ^[0-9]+$ ]] && (( energy_add_after_kill > 0 )); then
+      settle_secs="${settle_secs_raw}"
+      if [[ ! "${settle_secs}" =~ ^[0-9]+$ ]] || (( settle_secs <= 0 )); then
+        settle_secs=15
+      fi
+      builder_runs_before="$(builder_runs_count)"
+      remaining_before="$(energy_show_field "${trace}" remaining)"
+      run_dirs_before="$(count_trace_agent_run_dirs "${trace}")"
+      echo "snapshot before energy add: builder-runs=${builder_runs_before} remaining=${remaining_before} run-dirs=${run_dirs_before}"
+      operator_energy_add_trace "${trace}" "${energy_add_after_kill}"
+      if ! settle_no_redispatch "${trace}" "${task_id}" "${builder_runs_before}" "${settle_secs}"; then
+        oracle_ok=false
+      elif ! check_no_redispatch_oracle "${case_id}" "${trace}" "${task_id}" \
+        "${builder_runs_before}" "${remaining_before}" "${energy_add_after_kill}" "${run_dirs_before}"; then
+        oracle_ok=false
+      fi
+      task_status="$(task_show_field "${trace}" "${task_id}" status)"
+    fi
   else
-    task_status="$(wait_for_terminal_task "${trace}" "${task_id}" "${remaining_timeout}")" || true
-  fi
-  replay_out="$(collect_replay_lines "${trace}")"
-  if check_kill_oracle "${case_id}" "${trace}" "${task_id}" "${replay_out}"; then
-    oracle_ok=true
+    task_status="timeout"
+    oracle_ok=false
   fi
 elif [[ -n "${reject_when}" ]]; then
   # HITL reject → rework → approve (e.g. 06-human-reject).

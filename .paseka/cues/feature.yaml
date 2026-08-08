@@ -2,5 +2,6 @@ description: Intake an idea or bug for Scout classification
 emit: signal
 type: SIGNAL
 kind: feature.requested
+energy_budget: 6
 title: "{{.Title}}"
 body: "{{.Body}}"

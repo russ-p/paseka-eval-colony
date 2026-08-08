@@ -83,6 +83,8 @@ elif field == "score_expect_intent":
     print(nested("score", "expect_intent") or "")
 elif field == "score_expect_energy_budget_lte":
     print(nested("score", "expect_energy_budget_lte") or "")
+elif field == "score_expect_scout_run":
+    print(nested("score", "expect_scout_run") or "")
 elif field == "fault_mode":
     print(nested("fault", "mode") or "scripted")
 elif field == "fault_broken_diff":
@@ -236,6 +238,7 @@ materialize_seed() {
   echo "${case_id}" > "${EVAL_META_DIR}/case-id"
   echo "${case_dir}" > "${EVAL_META_DIR}/case-dir"
   echo "0" > "${EVAL_META_DIR}/builder-runs"
+  echo "0" > "${EVAL_META_DIR}/scout-runs"
   echo "$(read_case_field "$case_id" trace)" > "${EVAL_META_DIR}/trace"
   # Script receiver reads this to skip auto-complete for HITL review gates.
   echo "$(read_case_field "$case_id" task_review)" > "${EVAL_META_DIR}/task-review"
@@ -850,6 +853,30 @@ builder_runs_count() {
   else
     echo "0"
   fi
+}
+
+scout_runs_count() {
+  if [[ -f "${EVAL_META_DIR}/scout-runs" ]]; then
+    cat "${EVAL_META_DIR}/scout-runs"
+  else
+    echo "0"
+  fi
+}
+
+check_scout_run_oracle() {
+  local trace_id="$1"
+  local runs
+  runs="$(scout_runs_count)"
+  if [[ ! "${runs}" =~ ^[0-9]+$ ]] || (( runs < 1 )); then
+    echo "scout run oracle: scout-runs=${runs@Q}, want >= 1" >&2
+    return 1
+  fi
+  if ! find "${EVAL_ROOT}/.paseka/runs/${trace_id}" -mindepth 1 -maxdepth 1 -type d ! -name 'tasks' -print -quit | grep -q .; then
+    echo "scout run oracle: no agent run dir under .paseka/runs/${trace_id}" >&2
+    return 1
+  fi
+  echo "scout run oracle: scout-runs=${runs}, agent run dir present"
+  return 0
 }
 
 # Agent adapter runs live at .paseka/runs/<trace>/<agentId>/ (tasks/ is separate).

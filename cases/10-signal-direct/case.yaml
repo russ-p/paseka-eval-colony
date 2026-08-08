@@ -1,0 +1,18 @@
+id: 10-signal-direct
+trace: eval-10-signal-direct
+seed: seed/
+ingress:
+  mode: cue
+  id: feature
+fault:
+  mode: none
+oracle:
+  expect_event_chain:
+    - type: SIGNAL
+      kind: feature.requested
+    - type: SIGNAL
+      kind: feature.classified
+score:
+  must_pass_tests: false
+  expect_scout_run: true
+timeout: 3m

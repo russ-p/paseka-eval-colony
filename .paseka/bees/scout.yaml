@@ -1,13 +1,12 @@
 role: scout
-adapter: cursor
-prompt_template: scout.md
-default_intent: survey
-params:
-  output_format: stream-json
-  trust: true
-  force: true
-  plan: false
+adapter: script
+command: ${COLONY_ROOT}/scripts/scout.sh
+default_intent: intake
 worktree: false
+subscribes:
+  - type: SIGNAL
+    kind: feature.requested
+    dispatch: direct
 publishes:
-  - type: INSIGHT
-    kind: task.plan
+  - type: SIGNAL
+    kind: feature.classified

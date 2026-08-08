@@ -21,7 +21,7 @@ Requires `paseka` on `PATH`, NATS (`paseka doctor`), and Go for oracle commands.
 
 `run-case.sh` writes reports to `reports/` and prints `paseka replay` output. Pass `--keep-runtime` as a second arg to leave `paseka run` running.
 
-Cue ingress (`ingress.mode: cue` in `case.yaml`): reset skips `--reseed-energy` so the cue's `energy_budget` seeds honey instead of colony defaults.
+Cue ingress (`ingress.mode: cue` in `case.yaml`): reset skips `--reseed-energy` so the cue's `energy_budget` seeds honey instead of colony defaults. Signal cues (`emit: signal`) do not print a `Task:` line — cases score scout direct dispatch instead of task ledger status.
 
 ## State
 

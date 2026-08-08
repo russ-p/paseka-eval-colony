@@ -9,7 +9,7 @@ Platform repo: [paseka](https://github.com/russ-p/paseka). Design spec: [docs/sp
 ```text
 .paseka/     colony config, eval-tuned bees (adapter: script)
 cases/       case.yaml + seed/, broken/, expect/ per task
-scripts/     builder.sh, guard.sh, receiver.sh
+scripts/     builder.sh, guard.sh, receiver.sh, scout.sh
 runner/      reset.sh, run-case.sh (Tier B harness)
 ```
 
@@ -42,7 +42,7 @@ paseka init                              # idempotent
 2. `cases/<id>/seed/` — tiny baseline tree (usually `go.mod` + one package).
 3. `cases/<id>/broken/` — intentional bad fix for scripted fault injection.
 4. `cases/<id>/expect/` — correct tree for builder rework pass.
-5. `cases/<id>/task.body` — task text for `paseka task create --file`, or cue text for `paseka cue run` when `ingress.mode: cue`.
+5. `cases/<id>/task.body` — task text for `paseka task create --file`, or cue text for `paseka cue run` when `ingress.mode: cue`. Signal cues (`emit: signal`) create no ledger task; score on scout dispatch and event chain (`expect_scout_run`).
 
 Run: `./runner/run-case.sh <id>`.
 

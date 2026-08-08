@@ -35,6 +35,7 @@ kill_reason="$(read_case_field "${case_id}" operator_kill_reason)"
 energy_add_after_kill="$(read_case_field "${case_id}" operator_energy_add_after_kill)"
 settle_secs_raw="$(read_case_field "${case_id}" operator_settle_secs)"
 reject_when="$(read_case_field "${case_id}" operator_reject_when)"
+expect_scout_run="$(read_case_field "${case_id}" score_expect_scout_run)"
 task_body_file="$(case_dir_for "${case_id}")/task.body"
 
 if [[ "${ingress_mode}" != "cue" && -z "${title}" ]]; then
@@ -79,12 +80,17 @@ if [[ "${ingress_mode}" == "cue" ]]; then
   cue_out="$(paseka cue run "${cue_id}" "${cue_text}" --trace "${trace}" -C "${EVAL_ROOT}" 2>&1)"
   echo "${cue_out}"
   task_id="$(echo "${cue_out}" | awk '/^Task:/{print $2}')"
-  if [[ -z "${task_id}" ]]; then
+  if [[ -z "${task_id}" && "${expect_scout_run}" != "true" ]]; then
     echo "failed to parse task id from paseka cue run output" >&2
     exit 1
   fi
-  if ! check_cue_energy_oracle "${case_id}" "${trace}"; then
-    exit 1
+  if [[ -z "${task_id}" ]]; then
+    echo "signal cue: no ledger task (expected for SIGNAL ingress)"
+  fi
+  if [[ -n "$(read_case_field "${case_id}" score_expect_energy_budget_lte)" ]]; then
+    if ! check_cue_energy_oracle "${case_id}" "${trace}"; then
+      exit 1
+    fi
   fi
 else
   echo "creating task on trace ${trace}..."
@@ -187,6 +193,20 @@ elif [[ -n "${reject_when}" ]]; then
     fi
   fi
   replay_out="$(collect_replay_lines "${trace}")"
+elif [[ "${expect_scout_run}" == "true" ]]; then
+  # SIGNAL cue → feature.requested → scout direct dispatch (e.g. 10-signal-direct).
+  echo "waiting for scout direct dispatch (feature.classified, up to ${timeout_secs}s)..."
+  scout_ok=false
+  if wait_for_replay_kind "${trace}" "SIGNAL" "feature.classified" "${timeout_secs}"; then
+    if check_scout_run_oracle "${trace}"; then
+      scout_ok=true
+    fi
+  fi
+  if [[ "${scout_ok}" == "true" ]]; then
+    oracle_ok=true
+  fi
+  task_status=""
+  replay_out="$(collect_replay_lines "${trace}")"
 elif [[ "${must_pass_tests}" == "false" ]]; then
   if [[ -n "${expect_task_status}" ]]; then
     task_status="$(wait_for_expected_task_status "${trace}" "${task_id}" "${expect_task_status}" "${timeout_secs}")" || true
@@ -222,7 +242,7 @@ if check_replay_event_chain "${case_id}" "${replay_out}"; then
 fi
 
 cue_oracle_ok=true
-if [[ "${ingress_mode}" == "cue" ]]; then
+if [[ "${ingress_mode}" == "cue" && -n "${task_id}" ]]; then
   if ! check_cue_task_oracle "${case_id}" "${trace}" "${task_id}"; then
     cue_oracle_ok=false
   fi
@@ -235,6 +255,10 @@ if [[ -n "${kill_after}" ]]; then
   fi
 elif [[ -n "${reject_when}" ]]; then
   if [[ "${oracle_ok}" == "true" && "${task_status}" == "${expect_task_status}" && "${event_chain_ok}" == "true" ]]; then
+    passed=true
+  fi
+elif [[ "${expect_scout_run}" == "true" ]]; then
+  if [[ "${oracle_ok}" == "true" && "${event_chain_ok}" == "true" ]]; then
     passed=true
   fi
 elif [[ "${must_pass_tests}" == "false" ]]; then

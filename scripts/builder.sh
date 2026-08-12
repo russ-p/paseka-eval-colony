@@ -27,6 +27,16 @@ runs=0
 runs=$((runs + 1))
 echo "${runs}" > "${runs_file}"
 
+# Optional kill-window hold: increment builder-runs first so the harness can see
+# activity, then sleep so paseka kill lands while the adapter is still in-flight.
+hold=0
+hold_file="${eval_dir}/builder-hold-secs"
+[[ -f "${hold_file}" ]] && hold="$(cat "${hold_file}")"
+if [[ "${hold}" =~ ^[0-9]+$ ]] && (( hold > 0 )); then
+  echo "eval builder: holding ${hold}s for operator kill window (run ${runs})"
+  sleep "${hold}"
+fi
+
 cd "${workspace}"
 
 apply_broken() {

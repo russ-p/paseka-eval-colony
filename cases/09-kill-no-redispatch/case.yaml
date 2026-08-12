@@ -17,6 +17,8 @@ energy:
 operator:
   # Wait until script builder has started at least one run, then hard-kill.
   kill_after: activity
+  # Keep adapter in-flight so kill lands before fast script completion.
+  builder_hold_secs: 30
   reason: "eval hard stop"
   # US4: energy.add after kill tops up honey but must not redispatch.
   energy_add_after_kill: 5

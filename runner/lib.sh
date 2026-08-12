@@ -109,6 +109,8 @@ elif field == "operator_kill_after":
     print(nested("operator", "kill_after") or "")
 elif field == "operator_kill_reason":
     print(nested("operator", "reason") or "")
+elif field == "operator_builder_hold_secs":
+    print(nested("operator", "builder_hold_secs") or "")
 elif field == "operator_energy_add_after_kill":
     print(nested("operator", "energy_add_after_kill") or "")
 elif field == "operator_settle_secs":
@@ -359,6 +361,17 @@ reset_case() {
   fi
   materialize_seed "$case_id"
   echo "${fault_mode}" > "${EVAL_META_DIR}/fault-mode"
+  # Kill cases need an in-flight adapter window; default 30s when kill_after is set.
+  hold_secs="$(read_case_field "$case_id" operator_builder_hold_secs)"
+  kill_after="$(read_case_field "$case_id" operator_kill_after)"
+  if [[ -z "${hold_secs}" && -n "${kill_after}" ]]; then
+    hold_secs=30
+  fi
+  if [[ "${hold_secs}" =~ ^[0-9]+$ ]] && (( hold_secs > 0 )); then
+    echo "${hold_secs}" > "${EVAL_META_DIR}/builder-hold-secs"
+  else
+    rm -f "${EVAL_META_DIR}/builder-hold-secs"
+  fi
   if [[ "${energy_topup}" =~ ^[0-9]+$ ]] && (( energy_topup > 0 )); then
     paseka energy add --trace "${trace_id}" --amount "${energy_topup}" -C "${EVAL_ROOT}" >/dev/null 2>&1 || true
   fi

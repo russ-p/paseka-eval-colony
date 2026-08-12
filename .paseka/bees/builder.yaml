@@ -1,6 +1,8 @@
 role: builder
 adapter: script
-command: ./scripts/builder.sh
+# Colony-root script so .eval hold/fault knobs and uncommitted harness edits are visible
+# (worktree ./scripts/builder.sh is frozen at seed HEAD).
+command: ${COLONY_ROOT}/scripts/builder.sh
 run_summary: disabled
 worktree: true
 subscribes:

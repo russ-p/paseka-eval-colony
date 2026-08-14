@@ -15,7 +15,7 @@ runner/           reset + run-case harness (Tier B)
 
 ## Status
 
-Phase 2 — Tier B cases `01`–`10` (scripted loop, energy block, first-pass, inject-mutation, kill, human reject, cue hotfix, deferred emit, kill no-redispatch, signal direct), script bees, reset + run-case runner.
+Phase 2 — Tier B cases `01`–`11` (scripted loop, energy block, first-pass, inject-mutation, kill, human reject, cue hotfix, deferred emit, kill no-redispatch, signal direct, ready-before-plan), script bees, reset + run-case runner.
 
 ## Quick start
 
@@ -45,5 +45,6 @@ Tier A evals live in the Paseka platform repo (`internal/runtime` tests).
 | `08-deferred-emit` | `eval-08-deferred-emit` | `deferred_emit` (015) | `--defer` flush before `run.summary`; fail → `flush --discard` |
 | `09-kill-no-redispatch` | `eval-09-kill-no-redispatch` | `always_broken` + kill + energy add | `cancelled`, honey tops up, no redispatch (US4) |
 | `10-signal-direct` | `eval-10-signal-direct` | cue `feature` + scout direct | `feature.requested` → `feature.classified` (no ledger task) |
+| `11-ready-before-plan` | `eval-11-ready-before-plan` | `ready_before_plan` + cue `feature` | live `task.ready` then deferred `task.plan` → builder completes |
 
 Reset model: `runner/reset.sh` purges ephemeral state (with `--reseed-energy` for task ingress; without for cue ingress), copies `cases/<id>/seed/` to repo root, commits `seedSha`, uses fixed `--trace` from `case.yaml`.

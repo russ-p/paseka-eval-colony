@@ -42,7 +42,7 @@ paseka init                              # idempotent
 2. `cases/<id>/seed/` — tiny baseline tree (usually `go.mod` + one package).
 3. `cases/<id>/broken/` — intentional bad fix for scripted fault injection.
 4. `cases/<id>/expect/` — correct tree for builder rework pass.
-5. `cases/<id>/task.body` — task text for `paseka task create --file`, or cue text for `paseka cue run` when `ingress.mode: cue`. Signal cues (`emit: signal`) create no ledger task; score on scout dispatch and event chain (`expect_scout_run`).
+5. `cases/<id>/task.body` — task text for `paseka task create --file`, or cue text for `paseka cue run` when `ingress.mode: cue`. Signal cues (`emit: signal`) create no ledger task at ingress; score on scout dispatch (`expect_scout_run`) unless the case later emits `task.plan` (set `task.id` for hive scoring).
 
 Run: `./runner/run-case.sh <id>`.
 

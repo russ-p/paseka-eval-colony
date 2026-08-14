@@ -10,3 +10,7 @@ subscribes:
 publishes:
   - type: SIGNAL
     kind: feature.classified
+  - type: INSIGHT
+    kind: task.plan
+  - type: SIGNAL
+    kind: task.ready

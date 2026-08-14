@@ -65,6 +65,8 @@ elif field == "oracle_command":
     print(nested("oracle", "command") or "go test ./...")
 elif field == "oracle_workdir":
     print(nested("oracle", "workdir") or ".")
+elif field == "task_id":
+    print(nested("task", "id"))
 elif field == "task_title":
     print(nested("task", "title"))
 elif field == "task_bee":

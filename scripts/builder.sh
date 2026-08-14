@@ -3,7 +3,8 @@
 # Modes: scripted (broken then expect), always_broken, first_pass (expect on run 1),
 # inject-mutation (expect on first builder run — runner injected the broken proposal),
 # deferred_emit (015: --defer context.note then expect; exit 0 → flush before run.summary),
-# deferred_fail (015: --defer then exit 1 → pending stays for flush --discard).
+# deferred_fail (015: --defer then exit 1 → pending stays for flush --discard),
+# ready_before_plan (live task.ready then deferred plan; first builder pass applies expect/).
 set -euo pipefail
 
 root="${PASEKA_COLONY_ROOT:?missing PASEKA_COLONY_ROOT}"
@@ -87,8 +88,8 @@ if [[ "${fault_mode}" == "deferred_emit" ]]; then
   apply_expect
 elif [[ "${fault_mode}" == "always_broken" ]]; then
   apply_broken
-elif [[ "${fault_mode}" == "first_pass" || "${fault_mode}" == "inject-mutation" ]]; then
-  # first_pass: correct on run 1. inject-mutation: builder never ran for v1;
+elif [[ "${fault_mode}" == "first_pass" || "${fault_mode}" == "inject-mutation" || "${fault_mode}" == "ready_before_plan" ]]; then
+  # first_pass / ready_before_plan: correct on run 1. inject-mutation: builder never ran for v1;
   # verification.failed is the first dispatch, so apply expect/ (not broken/).
   apply_expect
   # After HITL reject, identical expect/ is a no-op — nudge a comment so the

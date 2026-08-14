@@ -80,12 +80,17 @@ if [[ "${ingress_mode}" == "cue" ]]; then
   cue_out="$(paseka cue run "${cue_id}" "${cue_text}" --trace "${trace}" -C "${EVAL_ROOT}" 2>&1)"
   echo "${cue_out}"
   task_id="$(echo "${cue_out}" | awk '/^Task:/{print $2}')"
+  if [[ -z "${task_id}" ]]; then
+    task_id="$(read_case_field "${case_id}" task_id)"
+  fi
   if [[ -z "${task_id}" && "${expect_scout_run}" != "true" ]]; then
     echo "failed to parse task id from paseka cue run output" >&2
     exit 1
   fi
   if [[ -z "${task_id}" ]]; then
     echo "signal cue: no ledger task (expected for SIGNAL ingress)"
+  else
+    echo "ledger task ${task_id} (cue output or case.yaml task.id)"
   fi
   if [[ -n "$(read_case_field "${case_id}" score_expect_energy_budget_lte)" ]]; then
     if ! check_cue_energy_oracle "${case_id}" "${trace}"; then
@@ -193,7 +198,7 @@ elif [[ -n "${reject_when}" ]]; then
     fi
   fi
   replay_out="$(collect_replay_lines "${trace}")"
-elif [[ "${expect_scout_run}" == "true" ]]; then
+elif [[ "${expect_scout_run}" == "true" && -z "${task_id}" ]]; then
   # SIGNAL cue → feature.requested → scout direct dispatch (e.g. 10-signal-direct).
   echo "waiting for scout direct dispatch (feature.classified, up to ${timeout_secs}s)..."
   scout_ok=false
@@ -257,7 +262,7 @@ elif [[ -n "${reject_when}" ]]; then
   if [[ "${oracle_ok}" == "true" && "${task_status}" == "${expect_task_status}" && "${event_chain_ok}" == "true" ]]; then
     passed=true
   fi
-elif [[ "${expect_scout_run}" == "true" ]]; then
+elif [[ "${expect_scout_run}" == "true" && -z "${expect_task_status}" ]]; then
   if [[ "${oracle_ok}" == "true" && "${event_chain_ok}" == "true" ]]; then
     passed=true
   fi
@@ -268,6 +273,11 @@ elif [[ "${must_pass_tests}" == "false" ]]; then
 else
   if [[ "${oracle_ok}" == "true" && "${task_status}" == "${expect_task_status}" && "${event_chain_ok}" == "true" && "${cue_oracle_ok}" == "true" ]]; then
     passed=true
+  fi
+  if [[ "${passed}" == "true" && "${expect_scout_run}" == "true" ]]; then
+    if ! check_scout_run_oracle "${trace}"; then
+      passed=false
+    fi
   fi
 fi
 

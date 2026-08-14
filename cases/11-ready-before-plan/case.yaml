@@ -1,0 +1,40 @@
+id: 11-ready-before-plan
+trace: eval-11-ready-before-plan
+seed: seed/
+ingress:
+  mode: cue
+  id: feature
+# Ledger task is created by scout's deferred task.plan (signal cue has no Task: line).
+task:
+  id: 001-add-sum
+  review: none
+fault:
+  mode: ready_before_plan
+energy:
+  topup: 0
+oracle:
+  command: "go test ./pkg/..."
+  workdir: "."
+  max_rework_cycles: 0
+  expect_event_chain:
+    # Live ready before deferred plan (pendingReady park + promote on plan).
+    - type: SIGNAL
+      kind: feature.requested
+    - type: SIGNAL
+      kind: feature.classified
+    - type: SIGNAL
+      kind: task.ready
+    - type: INSIGHT
+      kind: task.plan
+    - type: MUTATION
+      kind: code.proposal.isolated
+    - type: VERIFICATION
+      kind: verification.success
+score:
+  must_pass_tests: true
+  expect_task_status: completed
+  expect_scout_run: true
+  expect_bee: builder
+  expect_intent: feature
+  max_builder_runs: 1
+timeout: 10m

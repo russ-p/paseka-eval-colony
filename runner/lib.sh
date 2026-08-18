@@ -127,6 +127,14 @@ elif field == "operator_approve_when":
     print(nested("operator", "approve_when") or "")
 elif field == "operator_approve_summary":
     print(nested("operator", "summary") or "")
+elif field == "score_expect_artifact_written_count":
+    print(nested("score", "expect_artifact_written_count") or "")
+elif field == "score_expect_artifact_prompt":
+    print(nested("score", "expect_artifact_prompt") or "")
+elif field == "score_expect_artifact_export":
+    print(nested("score", "expect_artifact_export") or "")
+elif field == "score_expect_artifact_handoff":
+    print(nested("score", "expect_artifact_handoff") or "")
 else:
     raise SystemExit(f"unknown field: {field}")
 PY
@@ -331,6 +339,36 @@ path.write_text(text)
 PY
 }
 
+# enable_builder_artifact_subscribe adds artifact.written direct dispatch for case 14.
+enable_builder_artifact_subscribe() {
+  mkdir -p "${EVAL_META_DIR}"
+  if [[ ! -f "${BUILDER_BEE_BACKUP}" ]]; then
+    cp "${BUILDER_BEE}" "${BUILDER_BEE_BACKUP}"
+  fi
+  python3 - "${BUILDER_BEE}" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+text = text.replace(
+    "command: ./scripts/builder.sh",
+    "command: ${COLONY_ROOT}/scripts/builder.sh",
+    1,
+)
+subscribe = """  - type: SIGNAL
+    kind: artifact.written
+    dispatch: direct
+"""
+if "kind: artifact.written" not in text:
+    needle = "  - type: VERIFICATION\n    kind: verification.failed\n    dispatch: direct\n"
+    if needle not in text:
+        raise SystemExit("builder.yaml: expected verification.failed subscribe")
+    text = text.replace(needle, needle + subscribe, 1)
+path.write_text(text)
+PY
+}
+
 restore_builder_bee() {
   if [[ -f "${BUILDER_BEE_BACKUP}" ]]; then
     cp "${BUILDER_BEE_BACKUP}" "${BUILDER_BEE}"
@@ -353,8 +391,14 @@ reset_case() {
   if [[ -n "${energy_budget}" && "${ingress_mode}" != "cue" ]]; then
     set_colony_energy_budget "${energy_budget}"
   fi
-  if [[ "${fault_mode}" == "deferred_emit" ]]; then
+  if [[ "${fault_mode}" == "deferred_emit" || "${fault_mode}" == "deferred_artifact" ]]; then
     enable_builder_run_summary
+  fi
+  if [[ "${fault_mode}" == "write_comb" && "${ingress_mode}" == "cue" ]]; then
+    enable_builder_artifact_subscribe
+    touch "${EVAL_META_DIR}/artifact-handoff"
+  else
+    rm -f "${EVAL_META_DIR}/artifact-handoff"
   fi
   if [[ "${ingress_mode}" == "cue" ]]; then
     purge_colony "${trace_id}" false
@@ -647,6 +691,96 @@ PY
   echo "deferred_emit" > "${EVAL_META_DIR}/fault-mode"
   echo "0" > "${EVAL_META_DIR}/builder-runs"
   echo "deferred fail probe: pending discarded; continuing to success path"
+  return 0
+}
+
+# probe_artifact_fail_no_flush: builder writes comb then exit 1; no artifact.written on bus.
+probe_artifact_fail_no_flush() {
+  local trace_id="$1"
+  local bee_out replay_out comb_file
+
+  echo "artifact fail probe: bee run builder (exit 1 after comb write)..."
+  echo "write_comb_fail" > "${EVAL_META_DIR}/fault-mode"
+  set +e
+  bee_out="$(paseka bee run builder --trace "${trace_id}" --body "artifact fail probe" -C "${EVAL_ROOT}" 2>&1)"
+  set -e
+  echo "${bee_out}"
+
+  replay_out="$(collect_replay_lines "${trace_id}")"
+  if echo "${replay_out}" | grep -qE 'SIGNAL[[:space:]]+\(artifact\.written\)'; then
+    echo "artifact fail probe: artifact.written leaked on failed run" >&2
+    echo "write_comb" > "${EVAL_META_DIR}/fault-mode"
+    return 1
+  fi
+
+  comb_file="${EVAL_ROOT}/.paseka/runs/${trace_id}/artifacts/research.md"
+  if [[ ! -f "${comb_file}" ]]; then
+    echo "artifact fail probe: research.md not on disk after fail" >&2
+    echo "write_comb" > "${EVAL_META_DIR}/fault-mode"
+    return 1
+  fi
+
+  # Fail probe leaves comb on disk (014 audit). Clear before success path so the
+  # next builder run captures an empty baseline and scan-flush sees new files.
+  rm -rf "${EVAL_ROOT}/.paseka/runs/${trace_id}/artifacts"
+
+  echo "write_comb" > "${EVAL_META_DIR}/fault-mode"
+  echo "0" > "${EVAL_META_DIR}/builder-runs"
+  echo "artifact fail probe: no bus flush; continuing to success path"
+  return 0
+}
+
+# check_artifact_oracles scores 014 comb flush side effects (count, prompt, export).
+check_artifact_oracles() {
+  local case_id="$1"
+  local trace_id="$2"
+  local replay_out="$3"
+  local want_count actual comb_dir prompt_file export_out
+
+  want_count="$(read_case_field "$case_id" score_expect_artifact_written_count)"
+  if [[ -n "${want_count}" ]]; then
+    actual="$(echo "${replay_out}" | grep -cE 'SIGNAL[[:space:]]+\(artifact\.written\)' || true)"
+    if [[ "${actual}" != "${want_count}" ]]; then
+      echo "artifact oracle: want ${want_count} artifact.written, got ${actual}" >&2
+      return 1
+    fi
+    echo "artifact oracle: artifact.written count=${actual}"
+  fi
+
+  if [[ "$(read_case_field "$case_id" score_expect_artifact_prompt)" == "true" ]]; then
+    local partial="${EVAL_ROOT}/.paseka/prompts/_partials/emit-howto.md"
+    comb_dir="${EVAL_ROOT}/.paseka/runs/${trace_id}/artifacts"
+    if ! grep -q '{{.ArtifactsDir}}' "${partial}"; then
+      echo "artifact oracle: emit-howto missing {{.ArtifactsDir}}" >&2
+      return 1
+    fi
+    if [[ ! -f "${comb_dir}/research.md" ]]; then
+      echo "artifact oracle: comb research.md missing under ${comb_dir}" >&2
+      return 1
+    fi
+    echo "artifact oracle: ArtifactsDir documented; comb research.md present"
+  fi
+
+  if [[ "$(read_case_field "$case_id" score_expect_artifact_export)" == "true" ]]; then
+    local export_path
+    export_path="$(paseka export --trace "${trace_id}" --include artifacts --format md -C "${EVAL_ROOT}" 2>/dev/null | tail -1)"
+    if [[ -z "${export_path}" || ! -f "${export_path}" ]]; then
+      echo "artifact oracle: export --include artifacts did not write a report file" >&2
+      return 1
+    fi
+    export_out="$(cat "${export_path}")"
+    rm -f "${export_path}"
+    if ! echo "${export_out}" | grep -q "Research brief"; then
+      echo "artifact oracle: export --include artifacts missing Research brief" >&2
+      return 1
+    fi
+    if echo "${export_out}" | grep -qE '\.hidden|scratch\.tmp'; then
+      echo "artifact oracle: skip-list files leaked into export" >&2
+      return 1
+    fi
+    echo "artifact oracle: export inlines research.md, skip-list omitted"
+  fi
+
   return 0
 }
 

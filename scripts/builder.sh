@@ -4,7 +4,10 @@
 # inject-mutation (expect on first builder run — runner injected the broken proposal),
 # deferred_emit (015: --defer context.note then expect; exit 0 → flush before run.summary),
 # deferred_fail (015: --defer then exit 1 → pending stays for flush --discard),
-# ready_before_plan (live task.ready then deferred plan; first builder pass applies expect/).
+# ready_before_plan (live task.ready then deferred plan; first builder pass applies expect/),
+# write_comb (014: write trail comb then expect; scan-flush on success),
+# write_comb_fail (014: write comb then exit 1 — no artifact.written),
+# deferred_artifact (014+015: --defer artifact.written; scan flush skipped when deferred pending).
 set -euo pipefail
 
 root="${PASEKA_COLONY_ROOT:?missing PASEKA_COLONY_ROOT}"
@@ -77,15 +80,62 @@ EOF
   fi
 }
 
+write_eval_comb() {
+  local comb_dir="${root}/.paseka/runs/${PASEKA_TRACE_ID}/artifacts"
+  mkdir -p "${comb_dir}"
+  cat > "${comb_dir}/research.md" <<'EOF'
+# Research brief
+
+Eval comb handoff notes for artifact protocol case.
+EOF
+  echo "hidden skip" > "${comb_dir}/.hidden"
+  echo "tmp skip" > "${comb_dir}/scratch.tmp"
+  echo "eval builder: wrote comb under ${comb_dir}"
+}
+
+emit_deferred_artifact() {
+  local comb_dir ref emit_out
+  comb_dir="${root}/.paseka/runs/${PASEKA_TRACE_ID}/artifacts"
+  ref=".paseka/runs/${PASEKA_TRACE_ID}/artifacts/deferred.md"
+  mkdir -p "${comb_dir}"
+  echo "deferred comb note" > "${comb_dir}/deferred.md"
+  echo "scan would announce this if flush ran" > "${comb_dir}/scan-extra.md"
+  emit_out="$(paseka event emit --defer --stdin -C "${root}" <<EOF
+{"traceId":"${PASEKA_TRACE_ID}","agentId":"${PASEKA_AGENT_ID}","type":"SIGNAL","payload":{"kind":"artifact.written","ref":"${ref}","artifactKind":"deferred","title":"Deferred"}}
+EOF
+)"
+  echo "eval builder: deferred artifact.written → ${emit_out}"
+  if ! echo "${emit_out}" | grep -q '"deferred":true'; then
+    echo "eval builder: expected deferred:true in artifact emit response" >&2
+    exit 1
+  fi
+}
+
+if [[ "${fault_mode}" == "write_comb_fail" ]]; then
+  write_eval_comb
+  echo "eval builder: write_comb_fail exiting 1 (no artifact.written flush)" >&2
+  exit 1
+fi
+
 if [[ "${fault_mode}" == "deferred_fail" ]]; then
   emit_deferred_note "eval-08 deferred fail probe"
   echo "eval builder: deferred_fail exiting 1 (pending must stay unpublished)" >&2
   exit 1
 fi
 
-if [[ "${fault_mode}" == "deferred_emit" ]]; then
+if [[ "${fault_mode}" == "deferred_artifact" ]]; then
+  emit_deferred_artifact
+  apply_expect
+elif [[ "${fault_mode}" == "deferred_emit" ]]; then
   emit_deferred_note "eval-08 deferred success note"
   apply_expect
+elif [[ "${fault_mode}" == "write_comb" ]]; then
+  if [[ -f "${eval_dir}/artifact-handoff" ]]; then
+    apply_expect
+  else
+    write_eval_comb
+    apply_expect
+  fi
 elif [[ "${fault_mode}" == "always_broken" ]]; then
   apply_broken
 elif [[ "${fault_mode}" == "first_pass" || "${fault_mode}" == "inject-mutation" || "${fault_mode}" == "ready_before_plan" ]]; then

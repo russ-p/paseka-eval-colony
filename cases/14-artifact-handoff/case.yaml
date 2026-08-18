@@ -1,0 +1,31 @@
+id: 14-artifact-handoff
+trace: eval-14-artifact-handoff
+seed: seed/
+ingress:
+  mode: cue
+  id: feature
+# Spec 014: scout writes comb; runtime flush publishes artifact.written;
+# builder (subscribed dispatch: direct) applies expect/ without re-writing comb.
+fault:
+  mode: write_comb
+oracle:
+  command: "go test ./pkg/..."
+  workdir: "."
+  max_rework_cycles: 0
+  expect_event_chain:
+    - type: SIGNAL
+      kind: feature.requested
+    - type: SIGNAL
+      kind: feature.classified
+    - type: SIGNAL
+      kind: artifact.written
+    - type: MUTATION
+      kind: code.proposal.isolated
+    - type: VERIFICATION
+      kind: verification.success
+score:
+  must_pass_tests: true
+  expect_scout_run: true
+  expect_artifact_handoff: true
+  max_builder_runs: 1
+timeout: 10m

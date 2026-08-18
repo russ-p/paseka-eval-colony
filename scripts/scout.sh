@@ -18,6 +18,23 @@ fault_mode=""
 
 echo "eval scout: direct intake run ${runs} fault=${fault_mode:-none}"
 
+write_eval_comb() {
+  local comb_dir="${root}/.paseka/runs/${PASEKA_TRACE_ID}/artifacts"
+  mkdir -p "${comb_dir}"
+  cat > "${comb_dir}/research.md" <<'EOF'
+# Research brief
+
+Eval comb handoff notes for artifact protocol case.
+EOF
+  echo "hidden skip" > "${comb_dir}/.hidden"
+  echo "tmp skip" > "${comb_dir}/scratch.tmp"
+  echo "eval scout: wrote comb under ${comb_dir}"
+}
+
+if [[ "${fault_mode}" == "write_comb" ]]; then
+  write_eval_comb
+fi
+
 paseka event emit --stdin -C "${PASEKA_COLONY_ROOT}" <<EOF
 {"traceId":"${PASEKA_TRACE_ID}","agentId":"${PASEKA_AGENT_ID}","type":"SIGNAL","payload":{"kind":"feature.classified","decision":"plan","rationale":"eval scout classified feature.requested"}}
 EOF

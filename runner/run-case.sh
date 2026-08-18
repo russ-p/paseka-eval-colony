@@ -69,6 +69,13 @@ if [[ "${fault_mode}" == "deferred_emit" ]]; then
   fi
 fi
 
+if [[ "${fault_mode}" == "write_comb" && "${ingress_mode}" != "cue" ]]; then
+  if ! probe_artifact_fail_no_flush "${trace}"; then
+    echo "artifact fail/no-flush probe failed" >&2
+    exit 1
+  fi
+fi
+
 if [[ "${ingress_mode}" == "cue" ]]; then
   cue_id="$(read_case_field "${case_id}" ingress_cue_id)"
   if [[ -z "${cue_id}" ]]; then
@@ -212,6 +219,26 @@ elif [[ "${expect_scout_run}" == "true" && -z "${task_id}" ]]; then
   fi
   task_status=""
   replay_out="$(collect_replay_lines "${trace}")"
+elif [[ "$(read_case_field "${case_id}" score_expect_artifact_handoff)" == "true" ]]; then
+  # Scout comb write → artifact.written flush → builder direct dispatch (case 14).
+  echo "waiting for artifact handoff hive loop (up to ${timeout_secs}s)..."
+  handoff_ok=false
+  if wait_for_replay_kind "${trace}" "SIGNAL" "feature.classified" "${timeout_secs}"; then
+    if wait_for_replay_kind "${trace}" "SIGNAL" "artifact.written" "${timeout_secs}"; then
+      if wait_for_replay_kind "${trace}" "VERIFICATION" "verification.success" "${timeout_secs}"; then
+        if run_oracle "${case_id}" "${trace}"; then
+          if check_scout_run_oracle "${trace}"; then
+            handoff_ok=true
+          fi
+        fi
+      fi
+    fi
+  fi
+  if [[ "${handoff_ok}" == "true" ]]; then
+    oracle_ok=true
+  fi
+  task_status=""
+  replay_out="$(collect_replay_lines "${trace}")"
 elif [[ "${must_pass_tests}" == "false" ]]; then
   if [[ -n "${expect_task_status}" ]]; then
     task_status="$(wait_for_expected_task_status "${trace}" "${task_id}" "${expect_task_status}" "${timeout_secs}")" || true
@@ -246,6 +273,13 @@ if check_replay_event_chain "${case_id}" "${replay_out}"; then
   event_chain_ok=true
 fi
 
+artifact_oracle_ok=true
+if [[ -n "$(read_case_field "${case_id}" score_expect_artifact_written_count)" ]]; then
+  if ! check_artifact_oracles "${case_id}" "${trace}" "${replay_out}"; then
+    artifact_oracle_ok=false
+  fi
+fi
+
 cue_oracle_ok=true
 if [[ "${ingress_mode}" == "cue" && -n "${task_id}" ]]; then
   if ! check_cue_task_oracle "${case_id}" "${trace}" "${task_id}"; then
@@ -262,6 +296,10 @@ elif [[ -n "${reject_when}" ]]; then
   if [[ "${oracle_ok}" == "true" && "${task_status}" == "${expect_task_status}" && "${event_chain_ok}" == "true" ]]; then
     passed=true
   fi
+elif [[ "$(read_case_field "${case_id}" score_expect_artifact_handoff)" == "true" ]]; then
+  if [[ "${oracle_ok}" == "true" && "${event_chain_ok}" == "true" && "${artifact_oracle_ok}" == "true" ]]; then
+    passed=true
+  fi
 elif [[ "${expect_scout_run}" == "true" && -z "${expect_task_status}" ]]; then
   if [[ "${oracle_ok}" == "true" && "${event_chain_ok}" == "true" ]]; then
     passed=true
@@ -271,7 +309,7 @@ elif [[ "${must_pass_tests}" == "false" ]]; then
     passed=true
   fi
 else
-  if [[ "${oracle_ok}" == "true" && "${task_status}" == "${expect_task_status}" && "${event_chain_ok}" == "true" && "${cue_oracle_ok}" == "true" ]]; then
+  if [[ "${oracle_ok}" == "true" && "${task_status}" == "${expect_task_status}" && "${event_chain_ok}" == "true" && "${cue_oracle_ok}" == "true" && "${artifact_oracle_ok}" == "true" ]]; then
     passed=true
   fi
   if [[ "${passed}" == "true" && "${expect_scout_run}" == "true" ]]; then

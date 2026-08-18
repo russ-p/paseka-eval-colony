@@ -20,4 +20,6 @@ Each event JSON object must include:
 - type — the event type your bee role may publish (see role-specific emit guidance below)
 - payload — event-specific object with required payload.kind
 
+Trail comb artifacts (spec 014): write handoff files under `{{.ArtifactsDir}}` during the run. Runtime scan-flushes `SIGNAL/artifact.written` on **successful** exit for files this run added or changed — do not emit `artifact.written` on every save.
+
 If the command returns "ok": false, treat it as a failed publish and correct the payload before continuing.

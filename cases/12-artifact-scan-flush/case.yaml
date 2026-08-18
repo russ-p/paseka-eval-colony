@@ -1,0 +1,33 @@
+id: 12-artifact-scan-flush
+trace: eval-12-artifact-scan-flush
+seed: seed/
+# Spec 014: script bee writes trail comb; runtime scan-flushes artifact.written
+# on success (SHA-256 delta). Fail probe writes comb then exit 1 — no bus event.
+task:
+  title: "Add sum with trail comb handoff"
+  body: |
+    Implement Sum in the seeded package so tests pass.
+  bee: builder
+  intent: test-fix
+  review: none
+fault:
+  mode: write_comb
+oracle:
+  command: "go test ./pkg/..."
+  workdir: "."
+  max_rework_cycles: 0
+  expect_event_chain:
+    - type: SIGNAL
+      kind: artifact.written
+    - type: MUTATION
+      kind: code.proposal.isolated
+    - type: VERIFICATION
+      kind: verification.success
+score:
+  must_pass_tests: true
+  expect_task_status: completed
+  max_builder_runs: 1
+  expect_artifact_written_count: 1
+  expect_artifact_prompt: true
+  expect_artifact_export: true
+timeout: 10m

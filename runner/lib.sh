@@ -79,6 +79,16 @@ elif field == "ingress_mode":
     print(nested("ingress", "mode") or "task")
 elif field == "ingress_cue_id":
     print(nested("ingress", "id") or "")
+elif field == "standing_ticks":
+    print(nested("standing", "ticks") or "")
+elif field == "standing_stipend":
+    print(nested("standing", "stipend") or "")
+elif field == "standing_overlap":
+    print(nested("standing", "overlap") or "")
+elif field == "standing_topup":
+    print(nested("standing", "topup") or "")
+elif field == "operator_watcher_hold_secs":
+    print(nested("operator", "watcher_hold_secs") or "")
 elif field == "score_expect_bee":
     print(nested("score", "expect_bee") or "")
 elif field == "score_expect_intent":
@@ -251,6 +261,7 @@ materialize_seed() {
   echo "${case_dir}" > "${EVAL_META_DIR}/case-dir"
   echo "0" > "${EVAL_META_DIR}/builder-runs"
   echo "0" > "${EVAL_META_DIR}/scout-runs"
+  echo "0" > "${EVAL_META_DIR}/watcher-runs"
   echo "$(read_case_field "$case_id" trace)" > "${EVAL_META_DIR}/trace"
   # Script receiver reads this to skip auto-complete for HITL review gates.
   echo "$(read_case_field "$case_id" task_review)" > "${EVAL_META_DIR}/task-review"
@@ -380,6 +391,7 @@ reset_case() {
   local case_id="$1"
   require_case "$case_id"
   local trace_id fault_mode energy_budget energy_topup ingress_mode
+  local hold_secs kill_after watcher_hold_secs
   trace_id="$(read_case_field "$case_id" trace)"
   fault_mode="$(read_case_field "$case_id" fault_mode)"
   energy_budget="$(read_case_field "$case_id" energy_budget)"
@@ -410,6 +422,7 @@ reset_case() {
   # Kill cases need an in-flight adapter window; default 30s when kill_after is set.
   hold_secs="$(read_case_field "$case_id" operator_builder_hold_secs)"
   kill_after="$(read_case_field "$case_id" operator_kill_after)"
+  watcher_hold_secs="$(read_case_field "$case_id" operator_watcher_hold_secs)"
   if [[ -z "${hold_secs}" && -n "${kill_after}" ]]; then
     hold_secs=30
   fi
@@ -417,6 +430,11 @@ reset_case() {
     echo "${hold_secs}" > "${EVAL_META_DIR}/builder-hold-secs"
   else
     rm -f "${EVAL_META_DIR}/builder-hold-secs"
+  fi
+  if [[ "${watcher_hold_secs}" =~ ^[0-9]+$ ]] && (( watcher_hold_secs > 0 )); then
+    echo "${watcher_hold_secs}" > "${EVAL_META_DIR}/watcher-hold-secs"
+  else
+    rm -f "${EVAL_META_DIR}/watcher-hold-secs"
   fi
   if [[ "${energy_topup}" =~ ^[0-9]+$ ]] && (( energy_topup > 0 )); then
     paseka energy add --trace "${trace_id}" --amount "${energy_topup}" -C "${EVAL_ROOT}" >/dev/null 2>&1 || true
@@ -829,6 +847,7 @@ energy_show_field() {
     | awk -v key="${field}" '
       $1 == "budget:" && key == "budget" { print $2; found=1 }
       $1 == "remaining:" && key == "remaining" { print $2; found=1 }
+      $1 == "added:" && key == "added" { print $2; found=1 }
       END { if (!found) print "" }
     '
 }
@@ -917,6 +936,234 @@ check_cue_task_oracle() {
     return 1
   fi
   echo "cue task oracle: bee=${actual_bee}, intent=${actual_intent}"
+  return 0
+}
+
+replay_event_count() {
+  local replay="$1"
+  local event_type="$2"
+  local event_kind="$3"
+  printf '%s\n' "${replay}" | grep -cE "${event_type}[[:space:]]+\(${event_kind}\)" || true
+}
+
+wait_for_watcher_activity() {
+  local trace_id="$1"
+  local task_id="$2"
+  local timeout_secs="$3"
+  local start now runs status
+  start=$(date +%s)
+  while true; do
+    runs=0
+    if [[ -f "${EVAL_META_DIR}/watcher-runs" ]]; then
+      runs="$(cat "${EVAL_META_DIR}/watcher-runs")"
+    fi
+    if [[ "${runs}" =~ ^[0-9]+$ ]] && (( runs >= 1 )); then
+      echo "watcher-runs=${runs}"
+      return 0
+    fi
+    status="$(task_show_field "${trace_id}" "${task_id}" status)"
+    case "${status}" in
+      running|waiting_review|blocked)
+        echo "task-status=${status}"
+        return 0
+        ;;
+    esac
+    now=$(date +%s)
+    if (( now - start >= timeout_secs )); then
+      echo "timeout (watcher-runs=${runs} status=${status:-missing})" >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+run_standing_trail_flow() {
+  local case_id="$1"
+  local trace_id="$2"
+  local task_body_file="$3"
+  local timeout_secs="$4"
+  local cue_id="$5"
+  local ticks="$6"
+  local stipend="$7"
+  local overlap="$8"
+  local topup="$9"
+  local cue_text first_out first_task second_out second_task
+  local first_status second_status overlap_rc overlap_out
+  local replay_before replay_after plans_before plans_after
+  local stipends_before stipends_after
+
+  STANDING_TASK_ID=""
+  STANDING_FIRST_TASK_ID=""
+  STANDING_TASK_STATUS="timeout"
+  STANDING_REPLAY=""
+  STANDING_OVERLAP_REFUSED=false
+
+  if ! [[ "${ticks}" =~ ^[0-9]+$ ]] || (( ticks != 2 )); then
+    echo "standing oracle: this flow requires exactly 2 ticks" >&2
+    return 1
+  fi
+  if ! [[ "${stipend}" =~ ^[0-9]+$ ]] || (( stipend < 1 )); then
+    echo "standing oracle: stipend must be a positive integer" >&2
+    return 1
+  fi
+  if ! [[ "${topup}" =~ ^[0-9]+$ ]]; then
+    topup=0
+  fi
+
+  cue_text="$(tr -d '\n' < "${task_body_file}" | sed 's/[[:space:]]*$//')"
+  if ! first_out="$(paseka cue run "${cue_id}" "${cue_text}" --trace "${trace_id}" -C "${EVAL_ROOT}" 2>&1)"; then
+    echo "${first_out}" >&2
+    STANDING_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  echo "${first_out}"
+  first_task="$(printf '%s\n' "${first_out}" | awk '/^Task:/{print $2; exit}')"
+  if [[ -z "${first_task}" ]]; then
+    echo "standing oracle: first cue did not return a task id" >&2
+    STANDING_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  STANDING_TASK_ID="${first_task}"
+  STANDING_FIRST_TASK_ID="${first_task}"
+  echo "first standing tick task=${first_task}"
+  echo "waiting for first standing tick activity (timeout ${timeout_secs}s)..."
+  if ! wait_for_watcher_activity "${trace_id}" "${first_task}" "${timeout_secs}"; then
+    STANDING_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+
+  if [[ "${overlap}" == "true" ]]; then
+    replay_before="$(collect_replay_lines "${trace_id}")"
+    plans_before="$(replay_event_count "${replay_before}" INSIGHT task.plan)"
+    stipends_before="$(replay_event_count "${replay_before}" SIGNAL energy.stipend)"
+    set +e
+    overlap_out="$(paseka cue run "${cue_id}" "${cue_text}" --trace "${trace_id}" -C "${EVAL_ROOT}" 2>&1)"
+    overlap_rc=$?
+    set -e
+    echo "${overlap_out}"
+    if (( overlap_rc == 0 )); then
+      echo "standing oracle: overlapping cue run unexpectedly succeeded" >&2
+      STANDING_REPLAY="$(collect_replay_lines "${trace_id}")"
+      return 1
+    fi
+    if ! printf '%s\n' "${overlap_out}" | grep -qiE 'busy|in flight'; then
+      echo "standing oracle: overlap error did not identify a busy tick" >&2
+      STANDING_REPLAY="$(collect_replay_lines "${trace_id}")"
+      return 1
+    fi
+    sleep 1
+    replay_after="$(collect_replay_lines "${trace_id}")"
+    plans_after="$(replay_event_count "${replay_after}" INSIGHT task.plan)"
+    stipends_after="$(replay_event_count "${replay_after}" SIGNAL energy.stipend)"
+    if [[ "${plans_after}" != "${plans_before}" || "${stipends_after}" != "${stipends_before}" ]]; then
+      echo "standing oracle: overlap refusal published ingress or stipend" >&2
+      STANDING_REPLAY="${replay_after}"
+      return 1
+    fi
+    STANDING_OVERLAP_REFUSED=true
+    echo "standing overlap refusal verified"
+  fi
+
+  if ! first_status="$(wait_for_expected_task_status "${trace_id}" "${first_task}" completed "${timeout_secs}")"; then
+    echo "standing oracle: first task status=${first_status}, want completed" >&2
+    STANDING_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  echo "first standing tick status=${first_status}"
+
+  if (( topup > 0 )); then
+    if ! operator_energy_add_trace "${trace_id}" "${topup}"; then
+      echo "standing oracle: energy top-up failed" >&2
+      STANDING_REPLAY="$(collect_replay_lines "${trace_id}")"
+      return 1
+    fi
+  fi
+
+  if ! second_out="$(paseka cue run "${cue_id}" "${cue_text}" --trace "${trace_id}" -C "${EVAL_ROOT}" 2>&1)"; then
+    echo "${second_out}" >&2
+    STANDING_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  echo "${second_out}"
+  second_task="$(printf '%s\n' "${second_out}" | awk '/^Task:/{print $2; exit}')"
+  if [[ -z "${second_task}" || "${second_task}" == "${first_task}" ]]; then
+    echo "standing oracle: second task id=${second_task@Q}, want a new id" >&2
+    STANDING_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  echo "second standing tick task=${second_task}"
+  if ! second_status="$(wait_for_expected_task_status "${trace_id}" "${second_task}" completed "${timeout_secs}")"; then
+    echo "standing oracle: second task status=${second_status}, want completed" >&2
+    STANDING_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+
+  STANDING_TASK_ID="${second_task}"
+  STANDING_TASK_STATUS="${second_status}"
+  STANDING_REPLAY="$(collect_replay_lines "${trace_id}")"
+  return 0
+}
+
+check_standing_trail_oracle() {
+  local trace_id="$1"
+  local first_task="$2"
+  local second_task="$3"
+  local ticks="$4"
+  local stipend="$5"
+  local topup="$6"
+  local overlap="$7"
+  local runs budget remaining added expected_remaining checkpoint
+  local plans ready completions consumes stipends titles artifacts
+
+  runs="$(cat "${EVAL_META_DIR}/watcher-runs" 2>/dev/null || true)"
+  budget="$(energy_show_field "${trace_id}" budget)"
+  remaining="$(energy_show_field "${trace_id}" remaining)"
+  added="$(energy_show_field "${trace_id}" added)"
+  [[ -n "${added}" ]] || added=0
+  expected_remaining=$(( stipend - 1 ))
+  checkpoint="${EVAL_ROOT}/.paseka/runs/${trace_id}/artifacts/checkpoint.json"
+
+  [[ "${runs}" == "${ticks}" ]] || { echo "standing oracle: watcher-runs=${runs}, want ${ticks}" >&2; return 1; }
+  [[ "${first_task}" != "${second_task}" ]] || { echo "standing oracle: task ids did not change" >&2; return 1; }
+  [[ "${budget}" == "${stipend}" ]] || { echo "standing oracle: budget=${budget}, want ${stipend}" >&2; return 1; }
+  [[ "${remaining}" == "${expected_remaining}" ]] || { echo "standing oracle: remaining=${remaining}, want ${expected_remaining}" >&2; return 1; }
+  [[ "${added}" == "${topup}" ]] || { echo "standing oracle: added=${added}, want ${topup}" >&2; return 1; }
+  [[ -f "${checkpoint}" ]] || { echo "standing oracle: checkpoint missing: ${checkpoint}" >&2; return 1; }
+
+  CHECKPOINT_FILE="${checkpoint}" EXPECTED_TICKS="${ticks}" python3 - <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+data = json.loads(Path(os.environ["CHECKPOINT_FILE"]).read_text())
+if data.get("ticks") != int(os.environ["EXPECTED_TICKS"]):
+    print(f"checkpoint ticks={data.get('ticks')}, want {os.environ['EXPECTED_TICKS']}", file=sys.stderr)
+    raise SystemExit(1)
+if data.get("previous") != int(os.environ["EXPECTED_TICKS"]) - 1:
+    print(f"checkpoint previous={data.get('previous')}, want {int(os.environ['EXPECTED_TICKS']) - 1}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+
+  plans="$(replay_event_count "${STANDING_REPLAY}" INSIGHT task.plan)"
+  ready="$(replay_event_count "${STANDING_REPLAY}" SIGNAL task.ready)"
+  completions="$(replay_event_count "${STANDING_REPLAY}" VERIFICATION task.completed)"
+  consumes="$(replay_event_count "${STANDING_REPLAY}" SIGNAL energy.consume)"
+  stipends="$(replay_event_count "${STANDING_REPLAY}" SIGNAL energy.stipend)"
+  titles="$(replay_event_count "${STANDING_REPLAY}" INSIGHT trace.title)"
+  artifacts="$(replay_event_count "${STANDING_REPLAY}" SIGNAL artifact.written)"
+  [[ "${plans}" == "${ticks}" ]] || { echo "standing oracle: task.plan count=${plans}, want ${ticks}" >&2; return 1; }
+  [[ "${ready}" == "${ticks}" ]] || { echo "standing oracle: task.ready count=${ready}, want ${ticks}" >&2; return 1; }
+  [[ "${completions}" == "${ticks}" ]] || { echo "standing oracle: task.completed count=${completions}, want ${ticks}" >&2; return 1; }
+  [[ "${consumes}" == "${ticks}" ]] || { echo "standing oracle: energy.consume count=${consumes}, want ${ticks}" >&2; return 1; }
+  [[ "${stipends}" == "1" ]] || { echo "standing oracle: energy.stipend count=${stipends}, want 1" >&2; return 1; }
+  [[ "${titles}" == "1" ]] || { echo "standing oracle: trace.title count=${titles}, want 1" >&2; return 1; }
+  [[ "${artifacts}" == "${ticks}" ]] || { echo "standing oracle: artifact.written count=${artifacts}, want ${ticks}" >&2; return 1; }
+  if [[ "${overlap}" == "true" && "${STANDING_OVERLAP_REFUSED}" != "true" ]]; then
+    echo "standing oracle: overlap refusal was not verified" >&2
+    return 1
+  fi
+  echo "standing oracle: ticks=${ticks} stipend=${stipend} remaining=${remaining} checkpoint reused"
   return 0
 }
 

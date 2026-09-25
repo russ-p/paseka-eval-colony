@@ -1,0 +1,11 @@
+description: Standing daily triage
+emit: task
+bee: watcher
+intent: triage
+review: none
+autorun: true
+standing:
+  trace: eval-15-standing-trail
+  stipend: 2
+title: "{{.Title}}"
+body: "{{.Body}}"

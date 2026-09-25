@@ -1,0 +1,45 @@
+id: 15-standing-trail-ticks
+trace: eval-15-standing-trail
+seed: seed/
+ingress:
+  mode: cue
+  id: standing-triage
+fault:
+  mode: standing_trail
+energy:
+  topup: 0
+standing:
+  ticks: 2
+  stipend: 2
+  overlap: true
+  topup: 3
+operator:
+  watcher_hold_secs: 8
+oracle:
+  command: "test -f .paseka/runs/eval-15-standing-trail/artifacts/checkpoint.json"
+  workdir: "."
+  expect_event_chain:
+    - type: INSIGHT
+      kind: trace.title
+    - type: INSIGHT
+      kind: task.plan
+    - type: SIGNAL
+      kind: task.ready
+    - type: SIGNAL
+      kind: energy.consume
+    - type: VERIFICATION
+      kind: task.completed
+    - type: SIGNAL
+      kind: energy.stipend
+    - type: INSIGHT
+      kind: task.plan
+    - type: SIGNAL
+      kind: task.ready
+    - type: SIGNAL
+      kind: energy.consume
+    - type: VERIFICATION
+      kind: task.completed
+score:
+  must_pass_tests: true
+  expect_task_status: completed
+timeout: 5m

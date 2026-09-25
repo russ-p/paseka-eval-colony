@@ -36,6 +36,10 @@ energy_add_after_kill="$(read_case_field "${case_id}" operator_energy_add_after_
 settle_secs_raw="$(read_case_field "${case_id}" operator_settle_secs)"
 reject_when="$(read_case_field "${case_id}" operator_reject_when)"
 expect_scout_run="$(read_case_field "${case_id}" score_expect_scout_run)"
+standing_ticks="$(read_case_field "${case_id}" standing_ticks)"
+standing_stipend="$(read_case_field "${case_id}" standing_stipend)"
+standing_overlap="$(read_case_field "${case_id}" standing_overlap)"
+standing_topup="$(read_case_field "${case_id}" standing_topup)"
 task_body_file="$(case_dir_for "${case_id}")/task.body"
 
 if [[ "${ingress_mode}" != "cue" && -z "${title}" ]]; then
@@ -76,7 +80,32 @@ if [[ "${fault_mode}" == "write_comb" && "${ingress_mode}" != "cue" ]]; then
   fi
 fi
 
-if [[ "${ingress_mode}" == "cue" ]]; then
+oracle_ok=false
+replay_out=""
+standing_flow_done=false
+if [[ "${fault_mode}" == "standing_trail" ]]; then
+  cue_id="$(read_case_field "${case_id}" ingress_cue_id)"
+  if [[ -z "${cue_id}" ]]; then
+    echo "case ${case_id}: ingress.id missing in case.yaml" >&2
+    exit 1
+  fi
+  if run_standing_trail_flow "${case_id}" "${trace}" "${task_body_file}" "${timeout_secs}" \
+    "${cue_id}" "${standing_ticks}" "${standing_stipend}" "${standing_overlap}" "${standing_topup}"; then
+    task_id="${STANDING_TASK_ID}"
+    task_status="${STANDING_TASK_STATUS}"
+    replay_out="${STANDING_REPLAY}"
+    if check_standing_trail_oracle "${trace}" "${STANDING_FIRST_TASK_ID}" "${task_id}" \
+      "${standing_ticks}" "${standing_stipend}" "${standing_topup}" "${standing_overlap}" && \
+      run_oracle "${case_id}" "${trace}"; then
+      oracle_ok=true
+    fi
+  else
+    task_id="${STANDING_TASK_ID}"
+    task_status="${STANDING_TASK_STATUS}"
+    replay_out="${STANDING_REPLAY:-$(collect_replay_lines "${trace}")}"
+  fi
+  standing_flow_done=true
+elif [[ "${ingress_mode}" == "cue" ]]; then
   cue_id="$(read_case_field "${case_id}" ingress_cue_id)"
   if [[ -z "${cue_id}" ]]; then
     echo "case ${case_id}: ingress.id missing in case.yaml" >&2
@@ -139,8 +168,9 @@ if [[ "${must_pass_tests}" == "true" && -z "${expect_task_status}" ]]; then
 fi
 
 echo "waiting for hive loop + oracle (timeout ${timeout_secs}s)..."
-oracle_ok=false
-if [[ -n "${kill_after}" ]]; then
+if [[ "${standing_flow_done}" == "true" ]]; then
+  :
+elif [[ -n "${kill_after}" ]]; then
   # Operator kill path (05-kill-cancel smoke; 09-kill-no-redispatch US4 energy.add no-redispatch).
   activity_wait="${timeout_secs}"
   if (( timeout_secs > 60 )); then

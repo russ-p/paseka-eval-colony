@@ -1,0 +1,12 @@
+role: watcher
+adapter: script
+command: ${COLONY_ROOT}/scripts/watcher.sh
+run_summary: disabled
+worktree: false
+subscribes:
+  - type: SIGNAL
+    kind: task.ready
+    dispatch: task
+publishes:
+  - type: VERIFICATION
+    kind: task.completed

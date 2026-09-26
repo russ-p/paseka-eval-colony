@@ -89,6 +89,10 @@ elif field == "standing_topup":
     print(nested("standing", "topup") or "")
 elif field == "operator_watcher_hold_secs":
     print(nested("operator", "watcher_hold_secs") or "")
+elif field == "operator_review_comments_file":
+    print(nested("operator", "review_comments_file") or "")
+elif field == "score_expect_rework_task":
+    print(nested("score", "expect_rework_task") or "")
 elif field == "score_expect_bee":
     print(nested("score", "expect_bee") or "")
 elif field == "score_expect_intent":
@@ -589,6 +593,25 @@ wait_for_terminal_task() {
 worktree_for_trace() {
   local trace_id="$1"
   echo "${EVAL_ROOT}/.paseka/worktrees/${trace_id}"
+}
+
+commit_trace_worktree() {
+  local trace_id="$1"
+  local message="$2"
+  local worktree
+  worktree="$(worktree_for_trace "${trace_id}")"
+  if [[ ! -d "${worktree}" ]]; then
+    echo "worktree commit: missing ${worktree}" >&2
+    return 1
+  fi
+  git -C "${worktree}" add -A
+  if git -C "${worktree}" diff --cached --quiet; then
+    echo "worktree commit: no changes for ${trace_id}"
+    return 0
+  fi
+  git -C "${worktree}" commit --no-verify -m "${message}" >/dev/null
+  echo "worktree commit: ${trace_id} ${message}"
+  return 0
 }
 
 # ensure_inject_worktree creates the platform worktree path and applies broken/
@@ -1167,6 +1190,168 @@ PY
   return 0
 }
 
+run_final_request_changes_flow() {
+  local case_id="$1"
+  local trace_id="$2"
+  local task_body_file="$3"
+  local timeout_secs="$4"
+  local title="$5"
+  local bee="$6"
+  local intent="$7"
+  local review="$8"
+  local comments_file="$9"
+  local feedback="${10}"
+  local summary="${11}"
+  local create_out initial_task final_status reject_out rework_task rework_status approve_out
+  local -a create_args
+
+  FINAL_REVIEW_TASK_ID="_review"
+  FINAL_REVIEW_INITIAL_TASK_ID=""
+  FINAL_REVIEW_REWORK_TASK_ID=""
+  FINAL_REVIEW_HELD=false
+  FINAL_REVIEW_REPLAY=""
+
+  if [[ ! -f "${comments_file}" ]]; then
+    echo "final request-changes oracle: comments file missing: ${comments_file}" >&2
+    return 1
+  fi
+
+  create_args=(
+    task create
+    --trace "${trace_id}"
+    --title "${title}"
+    --file "${task_body_file}"
+    --bee "${bee}"
+    --intent "${intent}"
+    --review "${review}"
+    --autorun
+    -C "${EVAL_ROOT}"
+  )
+  if ! create_out="$(paseka "${create_args[@]}" 2>&1)"; then
+    echo "${create_out}" >&2
+    FINAL_REVIEW_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  echo "${create_out}"
+  initial_task="$(printf '%s\n' "${create_out}" | awk '/^  task:/{print $2; exit}')"
+  if [[ -z "${initial_task}" ]]; then
+    echo "final request-changes oracle: initial task id missing" >&2
+    FINAL_REVIEW_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  FINAL_REVIEW_INITIAL_TASK_ID="${initial_task}"
+  echo "initial work task=${initial_task}"
+  if ! wait_for_success_scoring "${case_id}" "${trace_id}" "${initial_task}" completed "${timeout_secs}" >/dev/null; then
+    echo "final request-changes oracle: initial work did not complete" >&2
+    FINAL_REVIEW_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+
+  if ! final_status="$(wait_for_expected_task_status "${trace_id}" "${FINAL_REVIEW_TASK_ID}" waiting_review "${timeout_secs}")"; then
+    echo "final request-changes oracle: final gate status=${final_status}, want waiting_review" >&2
+    FINAL_REVIEW_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  echo "final gate status=${final_status}"
+  if ! commit_trace_worktree "${trace_id}" "eval final request changes: initial proposal"; then
+    echo "final request-changes oracle: initial worktree commit failed" >&2
+    FINAL_REVIEW_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+
+  if ! reject_out="$(operator_reject_comments "${trace_id}" "${FINAL_REVIEW_TASK_ID}" "${comments_file}" "${feedback}" 2>&1)"; then
+    echo "${reject_out}" >&2
+    FINAL_REVIEW_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  echo "${reject_out}"
+  rework_task="$(printf '%s\n' "${reject_out}" | awk '/rework task:/{print $3; exit}')"
+  if [[ -z "${rework_task}" || "${rework_task}" == "${initial_task}" ]]; then
+    echo "final request-changes oracle: rework task id=${rework_task@Q}" >&2
+    FINAL_REVIEW_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  FINAL_REVIEW_REWORK_TASK_ID="${rework_task}"
+  echo "rework task=${rework_task}"
+  if [[ "$(task_show_field "${trace_id}" "${FINAL_REVIEW_TASK_ID}" status)" != "waiting_review" ]]; then
+    echo "final request-changes oracle: final gate left waiting_review after request changes" >&2
+    FINAL_REVIEW_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+
+  if ! rework_status="$(wait_for_expected_task_status "${trace_id}" "${rework_task}" completed "${timeout_secs}")"; then
+    echo "final request-changes oracle: rework status=${rework_status}, want completed" >&2
+    FINAL_REVIEW_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  if [[ "$(task_show_field "${trace_id}" "${FINAL_REVIEW_TASK_ID}" status)" != "waiting_review" ]]; then
+    echo "final request-changes oracle: final gate changed while rework was in flight" >&2
+    FINAL_REVIEW_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  FINAL_REVIEW_HELD=true
+  echo "final gate held open after rework status=${rework_status}"
+  if ! commit_trace_worktree "${trace_id}" "eval final request changes: rework"; then
+    echo "final request-changes oracle: rework worktree commit failed" >&2
+    FINAL_REVIEW_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+
+  if ! approve_out="$(operator_approve_proposal "${trace_id}" "${FINAL_REVIEW_TASK_ID}" "${summary}" 2>&1)"; then
+    echo "${approve_out}" >&2
+    FINAL_REVIEW_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  echo "${approve_out}"
+  if ! final_status="$(wait_for_expected_task_status "${trace_id}" "${FINAL_REVIEW_TASK_ID}" completed "${timeout_secs}")"; then
+    echo "final request-changes oracle: final status=${final_status}, want completed" >&2
+    FINAL_REVIEW_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  FINAL_REVIEW_REPLAY="$(collect_replay_lines "${trace_id}")"
+  return 0
+}
+
+check_final_request_changes_oracle() {
+  local trace_id="$1"
+  local initial_task="$2"
+  local rework_task="$3"
+  local expect_rework_task="$4"
+  local final_status comments_path task_projection
+  local plans ready proposals successes completions artifacts feedback
+
+  final_status="$(task_show_field "${trace_id}" "${FINAL_REVIEW_TASK_ID}" status)"
+  [[ "${final_status}" == "completed" ]] || { echo "final request-changes oracle: final status=${final_status}, want completed" >&2; return 1; }
+  [[ "${FINAL_REVIEW_HELD}" == "true" ]] || { echo "final request-changes oracle: final gate was not held open" >&2; return 1; }
+  if [[ "${expect_rework_task}" == "true" ]]; then
+    [[ -n "${rework_task}" && "${rework_task}" != "${initial_task}" ]] || { echo "final request-changes oracle: rework task id missing or reused" >&2; return 1; }
+  fi
+
+  comments_path="${EVAL_ROOT}/.paseka/runs/${trace_id}/artifacts/review-comments.md"
+  [[ -f "${comments_path}" ]] || { echo "final request-changes oracle: comb packet missing: ${comments_path}" >&2; return 1; }
+  grep -q 'short revision note' "${comments_path}" || { echo "final request-changes oracle: review packet content missing" >&2; return 1; }
+  task_projection="${EVAL_ROOT}/.paseka/runs/${trace_id}/tasks/${rework_task}/task.md"
+  [[ -f "${task_projection}" ]] || { echo "final request-changes oracle: rework projection missing: ${task_projection}" >&2; return 1; }
+  grep -q 'review-comments.md' "${task_projection}" || { echo "final request-changes oracle: rework body does not reference comb packet" >&2; return 1; }
+
+  plans="$(replay_event_count "${FINAL_REVIEW_REPLAY}" INSIGHT task.plan)"
+  ready="$(replay_event_count "${FINAL_REVIEW_REPLAY}" SIGNAL task.ready)"
+  proposals="$(replay_event_count "${FINAL_REVIEW_REPLAY}" MUTATION code.proposal.isolated)"
+  successes="$(replay_event_count "${FINAL_REVIEW_REPLAY}" VERIFICATION verification.success)"
+  completions="$(replay_event_count "${FINAL_REVIEW_REPLAY}" VERIFICATION task.completed)"
+  artifacts="$(replay_event_count "${FINAL_REVIEW_REPLAY}" SIGNAL artifact.written)"
+  feedback="$(replay_event_count "${FINAL_REVIEW_REPLAY}" INSIGHT human.feedback)"
+  [[ "${plans}" == "3" ]] || { echo "final request-changes oracle: task.plan count=${plans}, want 3" >&2; return 1; }
+  [[ "${ready}" == "2" ]] || { echo "final request-changes oracle: task.ready count=${ready}, want 2" >&2; return 1; }
+  [[ "${proposals}" == "2" ]] || { echo "final request-changes oracle: isolated proposal count=${proposals}, want 2" >&2; return 1; }
+  [[ "${successes}" == "2" ]] || { echo "final request-changes oracle: verification.success count=${successes}, want 2" >&2; return 1; }
+  [[ "${completions}" == "3" ]] || { echo "final request-changes oracle: task.completed count=${completions}, want 3" >&2; return 1; }
+  [[ "${artifacts}" == "1" ]] || { echo "final request-changes oracle: artifact.written count=${artifacts}, want 1" >&2; return 1; }
+  [[ "${feedback}" == "1" ]] || { echo "final request-changes oracle: human.feedback count=${feedback}, want 1" >&2; return 1; }
+  echo "final request-changes oracle: rework=${rework_task} final held then approved"
+  return 0
+}
+
 check_energy_exhaustion_oracle() {
   local case_id="$1"
   local trace_id="$2"
@@ -1422,6 +1607,25 @@ wait_for_task_status_change() {
     fi
     sleep 1
   done
+}
+
+operator_reject_comments() {
+  local trace_id="$1"
+  local task_id="$2"
+  local comments_file="$3"
+  local feedback="$4"
+  local args=(
+    proposal reject
+    --trace "${trace_id}"
+    --task "${task_id}"
+    --comments-file "${comments_file}"
+    -C "${EVAL_ROOT}"
+  )
+  if [[ -n "${feedback}" ]]; then
+    args+=(--feedback "${feedback}")
+  fi
+  echo "operator request changes: paseka ${args[*]}" >&2
+  paseka "${args[@]}"
 }
 
 operator_reject_proposal() {

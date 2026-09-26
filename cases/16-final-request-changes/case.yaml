@@ -1,0 +1,53 @@
+id: 16-final-request-changes
+trace: eval-16-final-request-changes
+seed: seed/
+ingress:
+  mode: task
+task:
+  title: "Add sum for final request changes"
+  bee: builder
+  intent: test-fix
+  review: none
+fault:
+  mode: final_request_changes
+energy:
+  topup: 0
+operator:
+  review_comments_file: review-comments.md
+  feedback: "eval: request changes"
+  summary: "eval: approved after rework"
+oracle:
+  command: "go test ./pkg/..."
+  workdir: "."
+  expect_event_chain:
+    - type: INSIGHT
+      kind: task.plan
+    - type: SIGNAL
+      kind: task.ready
+    - type: MUTATION
+      kind: code.proposal.isolated
+    - type: VERIFICATION
+      kind: verification.success
+    - type: VERIFICATION
+      kind: task.completed
+    - type: SIGNAL
+      kind: artifact.written
+    - type: INSIGHT
+      kind: human.feedback
+    - type: INSIGHT
+      kind: task.plan
+    - type: SIGNAL
+      kind: task.ready
+    - type: MUTATION
+      kind: code.proposal.isolated
+    - type: VERIFICATION
+      kind: verification.success
+    - type: VERIFICATION
+      kind: task.completed
+    - type: VERIFICATION
+      kind: task.completed
+score:
+  must_pass_tests: true
+  expect_task_status: completed
+  expect_rework_task: true
+timeout: 10m

@@ -15,7 +15,7 @@ runner/           reset + run-case harness (Tier B)
 
 ## Status
 
-Phase 2 — Tier B cases `01`–`15` (scripted loop, energy block, first-pass, inject-mutation, kill, human reject, cue hotfix, deferred emit, kill no-redispatch, signal direct, ready-before-plan, artifacts, standing trail ticks), script bees, reset + run-case runner.
+Phase 2 — Tier B cases `01`–`16` (scripted loop, energy block, first-pass, inject-mutation, kill, human reject, cue hotfix, deferred emit, kill no-redispatch, signal direct, ready-before-plan, artifacts, standing trail ticks, final request-changes rework), script bees, reset + run-case runner.
 
 ## Quick start
 
@@ -50,5 +50,6 @@ Tier A evals live in the Paseka platform repo (`internal/runtime` tests).
 | `13-artifact-deferred-skip` | `eval-13-artifact-deferred-skip` | `deferred_artifact` | deferred artifact + scan flush → one `artifact.written` |
 | `14-artifact-handoff` | `eval-14-artifact-handoff` | cue `feature` + `write_comb` | scout comb → builder handoff → verification |
 | `15-standing-trail-ticks` | `eval-15-standing-trail` | standing cue | two ticks reuse checkpoint, replace stipend, refuse overlap |
+| `16-final-request-changes` | `eval-16-final-request-changes` | final review comments | comments file → rework task → final gate held → approve |
 
 Reset model: `runner/reset.sh` purges ephemeral state (with `--reseed-energy` for task ingress; without for cue ingress), copies `cases/<id>/seed/` to repo root, commits `seedSha`, uses fixed `--trace` from `case.yaml`. Standing-trail cases run their cue twice, verify checkpoint reuse and stipend replacement, and reject an overlapping tick.

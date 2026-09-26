@@ -40,6 +40,10 @@ standing_ticks="$(read_case_field "${case_id}" standing_ticks)"
 standing_stipend="$(read_case_field "${case_id}" standing_stipend)"
 standing_overlap="$(read_case_field "${case_id}" standing_overlap)"
 standing_topup="$(read_case_field "${case_id}" standing_topup)"
+review_comments_rel="$(read_case_field "${case_id}" operator_review_comments_file)"
+operator_feedback="$(read_case_field "${case_id}" operator_reject_feedback)"
+operator_summary="$(read_case_field "${case_id}" operator_approve_summary)"
+expect_rework_task="$(read_case_field "${case_id}" score_expect_rework_task)"
 task_body_file="$(case_dir_for "${case_id}")/task.body"
 
 if [[ "${ingress_mode}" != "cue" && -z "${title}" ]]; then
@@ -82,8 +86,31 @@ fi
 
 oracle_ok=false
 replay_out=""
+final_flow_done=false
 standing_flow_done=false
-if [[ "${fault_mode}" == "standing_trail" ]]; then
+if [[ "${fault_mode}" == "final_request_changes" ]]; then
+  if [[ -z "${review_comments_rel}" ]]; then
+    echo "case ${case_id}: operator.review_comments_file missing in case.yaml" >&2
+    exit 1
+  fi
+  comments_file="$(case_dir_for "${case_id}")/${review_comments_rel}"
+  if run_final_request_changes_flow "${case_id}" "${trace}" "${task_body_file}" "${timeout_secs}" \
+    "${title}" "${bee}" "${intent}" "${review}" "${comments_file}" "${operator_feedback}" "${operator_summary}"; then
+    task_id="${FINAL_REVIEW_TASK_ID}"
+    task_status="$(task_show_field "${trace}" "${task_id}" status)"
+    replay_out="${FINAL_REVIEW_REPLAY}"
+    if check_final_request_changes_oracle "${trace}" "${FINAL_REVIEW_INITIAL_TASK_ID}" \
+      "${FINAL_REVIEW_REWORK_TASK_ID}" "${expect_rework_task}" && \
+      run_oracle "${case_id}" "${trace}"; then
+      oracle_ok=true
+    fi
+  else
+    task_id="${FINAL_REVIEW_TASK_ID:-}"
+    task_status="timeout"
+    replay_out="${FINAL_REVIEW_REPLAY:-$(collect_replay_lines "${trace}")}"
+  fi
+  final_flow_done=true
+elif [[ "${fault_mode}" == "standing_trail" ]]; then
   cue_id="$(read_case_field "${case_id}" ingress_cue_id)"
   if [[ -z "${cue_id}" ]]; then
     echo "case ${case_id}: ingress.id missing in case.yaml" >&2
@@ -168,7 +195,9 @@ if [[ "${must_pass_tests}" == "true" && -z "${expect_task_status}" ]]; then
 fi
 
 echo "waiting for hive loop + oracle (timeout ${timeout_secs}s)..."
-if [[ "${standing_flow_done}" == "true" ]]; then
+if [[ "${final_flow_done}" == "true" ]]; then
+  :
+elif [[ "${standing_flow_done}" == "true" ]]; then
   :
 elif [[ -n "${kill_after}" ]]; then
   # Operator kill path (05-kill-cancel smoke; 09-kill-no-redispatch US4 energy.add no-redispatch).

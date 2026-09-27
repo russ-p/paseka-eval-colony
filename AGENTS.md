@@ -34,6 +34,7 @@ paseka init                              # idempotent
 - **Script bees emit with colony root** — `paseka event emit --stdin -C "${PASEKA_COLONY_ROOT}"` (worktree cwd breaks home-config resolution).
 - **Materialized seed is committed** — `runner/reset.sh` copies `cases/<id>/seed/` to repo root and commits `seedSha` before worktree creation.
 - **Score the oracle, not task status alone** — with `review: none`, runtime may mark the task `completed` before guard→builder rework finishes; `run-case.sh` polls worktree tests.
+- **PR delivery rewrites machine-local config** — a case with `defaults.delivery: pull_request` makes `reset.sh` patch `.paseka/colony.yaml`, point home `~/.config/paseka/paseka-eval-colony/config.yaml` at `scripts/forge-fixture.sh`, and swap `origin` for `.eval/forge-origin.git`. `restore_colony_config` (reset start + `run-case.sh` exit trap) reverts all three; do not hand-edit those files while a PR case runs.
 - **Do not commit** `.eval/`, `reports/`, `.paseka/runs/`, `.paseka/worktrees/`, or machine-local apiary state.
 
 ## Adding a case
@@ -43,6 +44,7 @@ paseka init                              # idempotent
 3. `cases/<id>/broken/` — intentional bad fix for scripted fault injection.
 4. `cases/<id>/expect/` — correct tree for builder rework pass.
 5. `cases/<id>/task.body` — task text for `paseka task create --file`, or cue text for `paseka cue run` when `ingress.mode: cue`. Signal cues (`emit: signal`) create no ledger task at ingress; score on scout dispatch (`expect_scout_run`) unless the case later emits `task.plan` (set `task.id` for hive scoring).
+6. `cases/<id>/pr-body.md` — only for `defaults.delivery: pull_request`: the builder emits it as `INSIGHT pr.body` so publish resolves a body without a `--pr-body` overlay.
 
 Run: `./runner/run-case.sh <id>`.
 

@@ -9,6 +9,14 @@ COLONY_CONFIG="${EVAL_ROOT}/.paseka/colony.yaml"
 COLONY_CONFIG_BACKUP="${EVAL_META_DIR}/colony.yaml.bak"
 BUILDER_BEE="${EVAL_ROOT}/.paseka/bees/builder.yaml"
 BUILDER_BEE_BACKUP="${EVAL_META_DIR}/builder.yaml.bak"
+# Pull-request delivery (017): forge driver fixture, its state dir, and the local
+# bare "origin" that keeps the head push on this machine.
+FORGE_FIXTURE="${EVAL_ROOT}/scripts/forge-fixture.sh"
+FORGE_STATE_DIR="${EVAL_ROOT}/.eval/forge"
+FORGE_BARE_ORIGIN="${EVAL_ROOT}/.eval/forge-origin.git"
+HOME_CONFIG="${HOME}/.config/paseka/paseka-eval-colony/config.yaml"
+HOME_CONFIG_BACKUP="${EVAL_META_DIR}/home-config.bak"
+ORIGIN_URL_BACKUP="${EVAL_META_DIR}/origin-url.bak"
 
 case_dir_for() {
   local case_id="$1"
@@ -91,6 +99,16 @@ elif field == "operator_watcher_hold_secs":
     print(nested("operator", "watcher_hold_secs") or "")
 elif field == "operator_review_comments_file":
     print(nested("operator", "review_comments_file") or "")
+elif field == "defaults_delivery":
+    print(nested("defaults", "delivery") or "")
+elif field == "operator_pr_title":
+    print(nested("operator", "pr_title") or "")
+elif field == "operator_pr_draft":
+    print(nested("operator", "draft") or "")
+elif field == "score_expect_pr_body_marker":
+    print(nested("score", "expect_pr_body_marker") or "")
+elif field == "score_expect_no_local_merge":
+    print(nested("score", "expect_no_local_merge") or "")
 elif field == "score_expect_rework_task":
     print(nested("score", "expect_rework_task") or "")
 elif field == "score_expect_bee":
@@ -248,6 +266,12 @@ purge_colony() {
     [[ -z "${branch}" ]] && continue
     git -C "${EVAL_ROOT}" branch -D "${branch}" >/dev/null 2>&1 || true
   done < <(git -C "${EVAL_ROOT}" branch --list 'paseka/eval-*' | sed 's/^[* ] //')
+  # A successful head push updates refs/remotes/origin/<branch>; drop those too so a
+  # recreated worktree branch pushes as a create, not a stale --force-with-lease.
+  while IFS= read -r ref; do
+    [[ -z "${ref}" ]] && continue
+    git -C "${EVAL_ROOT}" update-ref -d "${ref}" >/dev/null 2>&1 || true
+  done < <(git -C "${EVAL_ROOT}" for-each-ref --format='%(refname)' 'refs/remotes/origin/paseka/eval-*')
 }
 
 materialize_seed() {
@@ -315,12 +339,116 @@ path.write_text(text)
 PY
 }
 
+set_colony_delivery() {
+  # defaults.delivery is colony-wide, so a pull_request case patches it for the case
+  # window only. Colony.yaml is restored by restore_colony_config on reset/exit.
+  local delivery="$1"
+  mkdir -p "${EVAL_META_DIR}"
+  if [[ ! -f "${COLONY_CONFIG_BACKUP}" ]]; then
+    cp "${COLONY_CONFIG}" "${COLONY_CONFIG_BACKUP}"
+  fi
+  DELIVERY="${delivery}" python3 - "${COLONY_CONFIG}" <<'PY'
+import os
+import pathlib
+import re
+import sys
+
+delivery = os.environ["DELIVERY"]
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+if re.search(r"^\s+delivery:\s*\S+\s*$", text, re.M):
+    text = re.sub(
+        r"^(\s+delivery:)\s*\S+\s*$",
+        rf"\g<1> {delivery}",
+        text,
+        count=1,
+        flags=re.M,
+    )
+else:
+    if not re.search(r"^defaults:\s*$", text, re.M):
+        raise SystemExit("colony.yaml: defaults block missing")
+    text = re.sub(
+        r"^(defaults:\s*\n)",
+        rf"\1  delivery: {delivery}\n",
+        text,
+        count=1,
+        flags=re.M,
+    )
+path.write_text(text)
+PY
+}
+
+# enable_forge_fixture wires home forge.command to the deterministic driver and swaps
+# colony `origin` for a local bare repo, so the publish path really pushes a head but
+# never touches the GitHub remote. Called before `paseka run` starts: the runtime reads
+# home config once at startup and would skip reconcile without a forge command.
+enable_forge_fixture() {
+  mkdir -p "${EVAL_META_DIR}"
+  if [[ ! -x "${FORGE_FIXTURE}" ]]; then
+    echo "forge fixture missing or not executable: ${FORGE_FIXTURE}" >&2
+    return 1
+  fi
+  if [[ ! -f "${HOME_CONFIG_BACKUP}" ]]; then
+    cp "${HOME_CONFIG}" "${HOME_CONFIG_BACKUP}"
+  fi
+  if [[ ! -f "${ORIGIN_URL_BACKUP}" ]]; then
+    git -C "${EVAL_ROOT}" remote get-url origin > "${ORIGIN_URL_BACKUP}"
+  fi
+  FORGE_FIXTURE="${FORGE_FIXTURE}" python3 - "${HOME_CONFIG}" <<'PY'
+import os
+import pathlib
+import re
+import sys
+
+fixture = os.environ["FORGE_FIXTURE"]
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+block = "forge:\n  command:\n    - " + fixture + "\n"
+if re.search(r"^forge:\s*\n", text, re.M):
+    text = re.sub(
+        r"^forge:\s*\n(?:  .*\n?)*",
+        block,
+        text,
+        count=1,
+        flags=re.M,
+    )
+else:
+    text = text.rstrip("\n") + "\n" + block
+path.write_text(text)
+PY
+  local head_ref
+  head_ref="$(git -C "${EVAL_ROOT}" symbolic-ref --short HEAD)"
+  rm -rf "${FORGE_STATE_DIR}" "${FORGE_BARE_ORIGIN}"
+  mkdir -p "${FORGE_STATE_DIR}"
+  git init --bare -q "${FORGE_BARE_ORIGIN}"
+  git -C "${EVAL_ROOT}" push -q "${FORGE_BARE_ORIGIN}" "refs/heads/${head_ref}:refs/heads/${head_ref}"
+  git -C "${EVAL_ROOT}" remote set-url origin "${FORGE_BARE_ORIGIN}"
+  echo "forge fixture: command=${FORGE_FIXTURE} origin=${FORGE_BARE_ORIGIN} (base ${head_ref})"
+}
+
+restore_forge_config() {
+  if [[ -f "${HOME_CONFIG_BACKUP}" ]]; then
+    cp "${HOME_CONFIG_BACKUP}" "${HOME_CONFIG}"
+    rm -f "${HOME_CONFIG_BACKUP}"
+  fi
+  if [[ -f "${ORIGIN_URL_BACKUP}" ]]; then
+    local saved
+    saved="$(cat "${ORIGIN_URL_BACKUP}")"
+    if [[ -n "${saved}" ]]; then
+      git -C "${EVAL_ROOT}" remote set-url origin "${saved}" >/dev/null 2>&1 || true
+    fi
+    rm -f "${ORIGIN_URL_BACKUP}"
+  fi
+  rm -rf "${FORGE_STATE_DIR}" "${FORGE_BARE_ORIGIN}" >/dev/null 2>&1 || true
+}
+
 restore_colony_config() {
   if [[ -f "${COLONY_CONFIG_BACKUP}" ]]; then
     cp "${COLONY_CONFIG_BACKUP}" "${COLONY_CONFIG}"
     rm -f "${COLONY_CONFIG_BACKUP}"
   fi
   restore_builder_bee
+  restore_forge_config
 }
 
 # enable_builder_run_summary lets 015 assert flush-before-run.summary on success.
@@ -394,18 +522,22 @@ restore_builder_bee() {
 reset_case() {
   local case_id="$1"
   require_case "$case_id"
-  local trace_id fault_mode energy_budget energy_topup ingress_mode
+  local trace_id fault_mode energy_budget energy_topup ingress_mode delivery
   local hold_secs kill_after watcher_hold_secs
   trace_id="$(read_case_field "$case_id" trace)"
   fault_mode="$(read_case_field "$case_id" fault_mode)"
   energy_budget="$(read_case_field "$case_id" energy_budget)"
   energy_topup="$(read_case_field "$case_id" energy_topup)"
   ingress_mode="$(read_case_field "$case_id" ingress_mode)"
+  delivery="$(read_case_field "$case_id" defaults_delivery)"
   stop_runtime
   # Case energy_budget must be on colony.yaml before purge --reseed-energy.
   restore_colony_config
   if [[ -n "${energy_budget}" && "${ingress_mode}" != "cue" ]]; then
     set_colony_energy_budget "${energy_budget}"
+  fi
+  if [[ -n "${delivery}" ]]; then
+    set_colony_delivery "${delivery}"
   fi
   if [[ "${fault_mode}" == "deferred_emit" || "${fault_mode}" == "deferred_artifact" ]]; then
     enable_builder_run_summary
@@ -422,6 +554,10 @@ reset_case() {
     purge_colony "${trace_id}" true
   fi
   materialize_seed "$case_id"
+  # Bare origin gets the post-seed HEAD so the pushed head has a real base branch.
+  if [[ -n "${delivery}" ]]; then
+    enable_forge_fixture
+  fi
   echo "${fault_mode}" > "${EVAL_META_DIR}/fault-mode"
   # Kill cases need an in-flight adapter window; default 30s when kill_after is set.
   hold_secs="$(read_case_field "$case_id" operator_builder_hold_secs)"
@@ -1349,6 +1485,354 @@ check_final_request_changes_oracle() {
   [[ "${artifacts}" == "1" ]] || { echo "final request-changes oracle: artifact.written count=${artifacts}, want 1" >&2; return 1; }
   [[ "${feedback}" == "1" ]] || { echo "final request-changes oracle: human.feedback count=${feedback}, want 1" >&2; return 1; }
   echo "final request-changes oracle: rework=${rework_task} final held then approved"
+  return 0
+}
+
+forge_upsert_request() {
+  # Echoes the recorded upsert request of the fixture driver (one JSON object).
+  local trace_id="$1"
+  python3 - "${FORGE_STATE_DIR}/ops.log" "${trace_id}" <<'PY'
+import json
+import pathlib
+import sys
+
+log_path = pathlib.Path(sys.argv[1])
+trace = sys.argv[2]
+if not log_path.exists():
+    raise SystemExit(0)
+for line in log_path.read_text().splitlines():
+    if not line.strip():
+        continue
+    row = json.loads(line)
+    if row.get("op") == "upsert" and row.get("traceId") == trace:
+        print(json.dumps(row))
+PY
+}
+
+homestate_pull_request_field() {
+  local trace_id="$1"
+  local field="$2"
+  python3 - "$(dirname "${HOME_CONFIG}")/state.json" "${trace_id}" "${field}" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+trace, field = sys.argv[2], sys.argv[3]
+if not path.exists():
+    raise SystemExit(0)
+state = json.loads(path.read_text())
+for entry in state.get("pullRequests") or []:
+    if entry.get("traceId") == trace:
+        value = entry.get(field, "")
+        if isinstance(value, bool):
+            value = "true" if value else "false"
+        print(value if value is not None else "")
+        break
+PY
+}
+
+mark_forge_pr_merged() {
+  # Plays the host-side merge: the fixture reports the PR as merged from now on and
+  # the next `paseka run` reconcile tick (30s) closes the trail.
+  local trace_id="$1"
+  mkdir -p "${FORGE_STATE_DIR}"
+  touch "${FORGE_STATE_DIR}/${trace_id}.merged"
+}
+
+origin_has_branch() {
+  local branch="$1"
+  git -C "${EVAL_ROOT}" ls-remote --heads origin "refs/heads/${branch}" 2>/dev/null | grep -q .
+}
+
+operator_approve_publish() {
+  local trace_id="$1"
+  local task_id="$2"
+  local pr_title="$3"
+  local draft="$4"
+  local args=(
+    proposal approve
+    --trace "${trace_id}"
+    --task "${task_id}"
+    -C "${EVAL_ROOT}"
+  )
+  if [[ -n "${pr_title}" ]]; then
+    args+=(--pr-title "${pr_title}")
+  fi
+  if [[ "${draft}" == "true" ]]; then
+    args+=(--draft)
+  fi
+  echo "operator publish: paseka ${args[*]}" >&2
+  paseka "${args[@]}"
+}
+
+# run_pr_delivery_flow drives 017 end to end: isolated proposal -> publish (push head +
+# forge upsert) -> gate held open while the PR is open -> host merge -> reconcile.
+run_pr_delivery_flow() {
+  local case_id="$1"
+  local trace_id="$2"
+  local task_body_file="$3"
+  local timeout_secs="$4"
+  local title="$5"
+  local bee="$6"
+  local intent="$7"
+  local review="$8"
+  local pr_title="$9"
+  local draft="${10}"
+  local create_out initial_task final_status approve_out pr_url branch head_ref
+  local -a create_args
+
+  PR_DELIVERY_TASK_ID="_review"
+  PR_DELIVERY_INITIAL_TASK_ID=""
+  PR_DELIVERY_BRANCH="paseka/${trace_id}"
+  PR_DELIVERY_PR_URL=""
+  PR_DELIVERY_REPLAY=""
+
+  create_args=(
+    task create
+    --trace "${trace_id}"
+    --title "${title}"
+    --file "${task_body_file}"
+    --bee "${bee}"
+    --intent "${intent}"
+    --review "${review}"
+    --autorun
+    -C "${EVAL_ROOT}"
+  )
+  if ! create_out="$(paseka "${create_args[@]}" 2>&1)"; then
+    echo "${create_out}" >&2
+    PR_DELIVERY_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  echo "${create_out}"
+  initial_task="$(printf '%s\n' "${create_out}" | awk '/^  task:/{print $2; exit}')"
+  if [[ -z "${initial_task}" ]]; then
+    echo "pr delivery oracle: initial task id missing" >&2
+    PR_DELIVERY_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  PR_DELIVERY_INITIAL_TASK_ID="${initial_task}"
+  echo "initial work task=${initial_task}"
+  if ! wait_for_success_scoring "${case_id}" "${trace_id}" "${initial_task}" completed "${timeout_secs}" >/dev/null; then
+    echo "pr delivery oracle: initial work did not complete" >&2
+    PR_DELIVERY_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+
+  if ! final_status="$(wait_for_expected_task_status "${trace_id}" "${PR_DELIVERY_TASK_ID}" waiting_review "${timeout_secs}")"; then
+    echo "pr delivery oracle: final gate status=${final_status}, want waiting_review" >&2
+    PR_DELIVERY_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  echo "final gate status=${final_status}"
+  if ! commit_trace_worktree "${trace_id}" "eval pr delivery: isolated head"; then
+    echo "pr delivery oracle: worktree commit failed" >&2
+    PR_DELIVERY_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+
+  if ! approve_out="$(operator_approve_publish "${trace_id}" "${PR_DELIVERY_TASK_ID}" "${pr_title}" "${draft}" 2>&1)"; then
+    echo "${approve_out}" >&2
+    PR_DELIVERY_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  echo "${approve_out}"
+  pr_url="$(printf '%s\n' "${approve_out}" | awk '/^[[:space:]]*pull request:/{print $3; exit}')"
+  if [[ -z "${pr_url}" ]]; then
+    echo "pr delivery oracle: approve printed no pull request line" >&2
+    PR_DELIVERY_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  PR_DELIVERY_PR_URL="${pr_url}"
+  echo "published pull request=${pr_url}"
+
+  if [[ "$(task_show_field "${trace_id}" "${PR_DELIVERY_TASK_ID}" status)" != "waiting_review" ]]; then
+    echo "pr delivery oracle: final gate left waiting_review after publish" >&2
+    PR_DELIVERY_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  if ! origin_has_branch "${PR_DELIVERY_BRANCH}"; then
+    echo "pr delivery oracle: head ${PR_DELIVERY_BRANCH} missing on origin" >&2
+    PR_DELIVERY_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  if [[ "$(homestate_pull_request_field "${trace_id}" state)" != "open" ]]; then
+    echo "pr delivery oracle: homestate pull request state is not open" >&2
+    PR_DELIVERY_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  echo "final gate held open while pull request is open"
+
+  head_ref="$(git -C "${EVAL_ROOT}" symbolic-ref --short HEAD)"
+  if ! check_forge_upsert_request "${case_id}" "${trace_id}" "${PR_DELIVERY_BRANCH}" "${head_ref}" "${pr_title}"; then
+    PR_DELIVERY_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+
+  mark_forge_pr_merged "${trace_id}"
+  echo "pull request marked merged; waiting for runtime reconcile..."
+  if ! final_status="$(wait_for_expected_task_status "${trace_id}" "${PR_DELIVERY_TASK_ID}" completed "${timeout_secs}")"; then
+    echo "pr delivery oracle: final gate status=${final_status} after merge, want completed" >&2
+    PR_DELIVERY_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  PR_DELIVERY_REPLAY="$(collect_replay_lines "${trace_id}")"
+  return 0
+}
+
+check_forge_upsert_request() {
+  local case_id="$1"
+  local trace_id="$2"
+  local want_head="$3"
+  local want_base="$4"
+  local want_title="$5"
+  local want_body_marker want_draft upsert
+  want_body_marker="$(read_case_field "${case_id}" score_expect_pr_body_marker)"
+  want_draft="$(read_case_field "${case_id}" operator_pr_draft)"
+  upsert="$(forge_upsert_request "${trace_id}")"
+  if [[ -z "${upsert}" ]]; then
+    echo "pr delivery oracle: forge recorded no upsert for ${trace_id}" >&2
+    return 1
+  fi
+  if ! FORGE_UPSERT="${upsert}" python3 - \
+    "${want_head}" "${want_base}" "${want_title}" "${want_body_marker}" "${want_draft}" <<'PY'
+import json
+import os
+import sys
+
+row = json.loads(os.environ["FORGE_UPSERT"])
+want_head, want_base, want_title, want_body, want_draft = sys.argv[1:6]
+if row.get("head") != want_head:
+    raise SystemExit(f"forge upsert head={row.get('head')!r}, want {want_head!r}")
+if row.get("base") != want_base:
+    raise SystemExit(f"forge upsert base={row.get('base')!r}, want {want_base!r}")
+if want_title and row.get("title") != want_title:
+    raise SystemExit(f"forge upsert title={row.get('title')!r}, want {want_title!r}")
+if want_body and want_body not in (row.get("body") or ""):
+    raise SystemExit(f"forge upsert body missing {want_body!r}")
+if want_draft == "true" and not row.get("draft"):
+    raise SystemExit("forge upsert draft=false, want true")
+PY
+  then
+    return 1
+  fi
+  echo "forge upsert: head=${want_head} base=${want_base} draft=${want_draft:-false} title/body as expected"
+  return 0
+}
+
+# check_pr_delivery_oracle scores the delivery choreography: publish-side state, the
+# reconcile completion (agent=runtime), forge payload, cleanup, and the absence of a
+# local merge. The delivered head is tested separately by check_pr_head_tests.
+check_pr_delivery_oracle() {
+  local case_id="$1"
+  local trace_id="$2"
+  local expect_body_marker="$3"
+  local expect_no_local_merge="$4"
+  local plans ready bodies proposals successes completions feedback runtime_completed
+  local summary seed_sha head_now
+
+  if [[ "$(task_show_field "${trace_id}" "${PR_DELIVERY_TASK_ID}" status)" != "completed" ]]; then
+    echo "pr delivery oracle: final gate is not completed" >&2
+    return 1
+  fi
+  summary="$(task_show_field "${trace_id}" "${PR_DELIVERY_TASK_ID}" summary)"
+  if [[ "${summary}" != *"Pull request merged"* || "${summary}" != *"${PR_DELIVERY_PR_URL}"* ]]; then
+    echo "pr delivery oracle: final summary=${summary@Q}, want reconcile merge summary with PR url" >&2
+    return 1
+  fi
+
+  plans="$(replay_event_count "${PR_DELIVERY_REPLAY}" INSIGHT task.plan)"
+  ready="$(replay_event_count "${PR_DELIVERY_REPLAY}" SIGNAL task.ready)"
+  bodies="$(replay_event_count "${PR_DELIVERY_REPLAY}" INSIGHT pr.body)"
+  proposals="$(replay_event_count "${PR_DELIVERY_REPLAY}" MUTATION code.proposal.isolated)"
+  successes="$(replay_event_count "${PR_DELIVERY_REPLAY}" VERIFICATION verification.success)"
+  completions="$(replay_event_count "${PR_DELIVERY_REPLAY}" VERIFICATION task.completed)"
+  feedback="$(replay_event_count "${PR_DELIVERY_REPLAY}" INSIGHT human.feedback)"
+  [[ "${plans}" == "2" ]] || { echo "pr delivery oracle: task.plan count=${plans}, want 2" >&2; return 1; }
+  [[ "${ready}" == "1" ]] || { echo "pr delivery oracle: task.ready count=${ready}, want 1" >&2; return 1; }
+  [[ "${bodies}" == "1" ]] || { echo "pr delivery oracle: pr.body count=${bodies}, want 1" >&2; return 1; }
+  [[ "${proposals}" == "1" ]] || { echo "pr delivery oracle: isolated proposal count=${proposals}, want 1" >&2; return 1; }
+  [[ "${successes}" == "1" ]] || { echo "pr delivery oracle: verification.success count=${successes}, want 1" >&2; return 1; }
+  [[ "${completions}" == "2" ]] || { echo "pr delivery oracle: task.completed count=${completions}, want 2" >&2; return 1; }
+  [[ "${feedback}" == "0" ]] || { echo "pr delivery oracle: human.feedback count=${feedback}, want 0" >&2; return 1; }
+  runtime_completed="$(printf '%s\n' "${PR_DELIVERY_REPLAY}" | grep -cE 'VERIFICATION[[:space:]]+\(task.completed\) agent=runtime' || true)"
+  [[ "${runtime_completed}" == "1" ]] || { echo "pr delivery oracle: runtime task.completed count=${runtime_completed}, want 1" >&2; return 1; }
+
+  if [[ -n "${expect_body_marker}" ]]; then
+    local upsert
+    upsert="$(forge_upsert_request "${trace_id}")"
+    if ! FORGE_UPSERT="${upsert}" python3 - "${expect_body_marker}" <<'PY'
+import json
+import os
+import sys
+
+row = json.loads(os.environ.get("FORGE_UPSERT") or "{}")
+if sys.argv[1] not in (row.get("body") or ""):
+    raise SystemExit(f"forge upsert body missing {sys.argv[1]!r}")
+PY
+    then
+      return 1
+    fi
+  fi
+
+  if [[ -d "$(worktree_for_trace "${trace_id}")" ]]; then
+    echo "pr delivery oracle: worktree still present after merge" >&2
+    return 1
+  fi
+  # The local head branch is cleanup debt under pull_request delivery: reconcile drops
+  # it with `git branch -d`, which refuses an unmerged head, and purge removes it on
+  # the next reset. Assert only that it is no longer checked out anywhere.
+  if git -C "${EVAL_ROOT}" worktree list --porcelain | grep -q "branch refs/heads/${PR_DELIVERY_BRANCH}$"; then
+    echo "pr delivery oracle: ${PR_DELIVERY_BRANCH} is still checked out in a worktree" >&2
+    return 1
+  fi
+  if [[ -n "$(homestate_pull_request_field "${trace_id}" url)" ]]; then
+    echo "pr delivery oracle: homestate pull request identity not dropped" >&2
+    return 1
+  fi
+
+  if [[ "${expect_no_local_merge}" == "true" ]]; then
+    seed_sha="$(cat "${EVAL_META_DIR}/seed-sha" 2>/dev/null || true)"
+    head_now="$(git -C "${EVAL_ROOT}" rev-parse HEAD)"
+    if [[ -n "${seed_sha}" && "${head_now}" != "${seed_sha}" ]]; then
+      echo "pr delivery oracle: colony HEAD moved to ${head_now}, want seed ${seed_sha} (pull_request must not merge locally)" >&2
+      return 1
+    fi
+    if grep -q 'return a + b' "${EVAL_ROOT}/pkg/calc/calc.go" 2>/dev/null; then
+      echo "pr delivery oracle: fix landed on the colony default branch (must stay on the pushed head)" >&2
+      return 1
+    fi
+  fi
+
+  echo "pr delivery oracle: published ${PR_DELIVERY_PR_URL}, gate reconciled, no local merge"
+  return 0
+}
+
+# check_pr_head_tests clones the pushed head from the bare origin and runs the case
+# oracle there: under pull_request delivery the deliverable is the branch, not the
+# colony checkout (which is still the broken seed by design).
+check_pr_head_tests() {
+  local case_id="$1"
+  local branch="$2"
+  local cmd workdir tmp
+  cmd="$(read_case_field "${case_id}" oracle_command)"
+  workdir="$(read_case_field "${case_id}" oracle_workdir)"
+  tmp="$(mktemp -d)"
+  if ! git clone -q --branch "${branch}" "${FORGE_BARE_ORIGIN}" "${tmp}" >/dev/null 2>&1; then
+    rm -rf "${tmp}"
+    echo "pr head oracle: clone of pushed head ${branch} failed" >&2
+    return 1
+  fi
+  if [[ "${workdir}" != "." ]]; then
+    tmp="${tmp}/${workdir}"
+  fi
+  if ! (cd "${tmp}" && bash -lc "${cmd}"); then
+    rm -rf "${tmp}"
+    echo "pr head oracle: ${cmd} failed on pushed head ${branch}" >&2
+    return 1
+  fi
+  rm -rf "${tmp}"
+  echo "pr head oracle: ${cmd} passed on pushed head ${branch}"
   return 0
 }
 

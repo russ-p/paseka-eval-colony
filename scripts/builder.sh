@@ -7,7 +7,8 @@
 # ready_before_plan (live task.ready then deferred plan; first builder pass applies expect/),
 # write_comb (014: write trail comb then expect; scan-flush on success),
 # write_comb_fail (014: write comb then exit 1 — no artifact.written),
-# deferred_artifact (014+015: --defer artifact.written; scan flush skipped when deferred pending).
+# deferred_artifact (014+015: --defer artifact.written; scan flush skipped when deferred pending),
+# pr_delivery (017: expect on run 1 + INSIGHT pr.body so the publish path has a body to resolve).
 set -euo pipefail
 
 root="${PASEKA_COLONY_ROOT:?missing PASEKA_COLONY_ROOT}"
@@ -111,6 +112,34 @@ EOF
   fi
 }
 
+emit_pr_body() {
+  # 017 pull_request delivery: the runtime resolves the PR body from the last
+  # INSIGHT/pr.body of the trail when the operator passes no --pr-body overlay.
+  local body_file="${case_dir}/pr-body.md"
+  local emit_out
+  if [[ ! -f "${body_file}" ]]; then
+    echo "eval builder: missing pr body fixture ${body_file}" >&2
+    exit 1
+  fi
+  emit_out="$(PASEKA_PR_BODY_FILE="${body_file}" python3 - <<'PY' | paseka event emit --stdin -C "${root}"
+import json
+import os
+import pathlib
+
+print(json.dumps({
+    "traceId": os.environ["PASEKA_TRACE_ID"],
+    "agentId": os.environ["PASEKA_AGENT_ID"],
+    "type": "INSIGHT",
+    "payload": {
+        "kind": "pr.body",
+        "body": pathlib.Path(os.environ["PASEKA_PR_BODY_FILE"]).read_text().strip(),
+    },
+}))
+PY
+)"
+  echo "eval builder: pr.body → ${emit_out}"
+}
+
 if [[ "${fault_mode}" == "write_comb_fail" ]]; then
   write_eval_comb
   echo "eval builder: write_comb_fail exiting 1 (no artifact.written flush)" >&2
@@ -136,6 +165,9 @@ elif [[ "${fault_mode}" == "write_comb" ]]; then
     write_eval_comb
     apply_expect
   fi
+elif [[ "${fault_mode}" == "pr_delivery" ]]; then
+  apply_expect
+  emit_pr_body
 elif [[ "${fault_mode}" == "always_broken" ]]; then
   apply_broken
 elif [[ "${fault_mode}" == "first_pass" || "${fault_mode}" == "final_request_changes" || "${fault_mode}" == "inject-mutation" || "${fault_mode}" == "ready_before_plan" ]]; then

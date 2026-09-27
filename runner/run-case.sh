@@ -44,6 +44,10 @@ review_comments_rel="$(read_case_field "${case_id}" operator_review_comments_fil
 operator_feedback="$(read_case_field "${case_id}" operator_reject_feedback)"
 operator_summary="$(read_case_field "${case_id}" operator_approve_summary)"
 expect_rework_task="$(read_case_field "${case_id}" score_expect_rework_task)"
+pr_title="$(read_case_field "${case_id}" operator_pr_title)"
+pr_draft="$(read_case_field "${case_id}" operator_pr_draft)"
+expect_pr_body_marker="$(read_case_field "${case_id}" score_expect_pr_body_marker)"
+expect_no_local_merge="$(read_case_field "${case_id}" score_expect_no_local_merge)"
 task_body_file="$(case_dir_for "${case_id}")/task.body"
 
 if [[ "${ingress_mode}" != "cue" && -z "${title}" ]]; then
@@ -86,9 +90,28 @@ fi
 
 oracle_ok=false
 replay_out=""
+pr_flow_done=false
 final_flow_done=false
 standing_flow_done=false
-if [[ "${fault_mode}" == "final_request_changes" ]]; then
+if [[ "${fault_mode}" == "pr_delivery" ]]; then
+  if run_pr_delivery_flow "${case_id}" "${trace}" "${task_body_file}" "${timeout_secs}" \
+    "${title}" "${bee}" "${intent}" "${review}" "${pr_title}" "${pr_draft}"; then
+    task_id="${PR_DELIVERY_TASK_ID}"
+    task_status="$(task_show_field "${trace}" "${task_id}" status)"
+    replay_out="${PR_DELIVERY_REPLAY}"
+    # Under pull_request delivery the deliverable is the pushed head: the worktree is
+    # gone after reconcile, so the colony-root oracle no longer applies here.
+    if check_pr_delivery_oracle "${case_id}" "${trace}" "${expect_pr_body_marker}" "${expect_no_local_merge}" && \
+      check_pr_head_tests "${case_id}" "${PR_DELIVERY_BRANCH}"; then
+      oracle_ok=true
+    fi
+  else
+    task_id="${PR_DELIVERY_TASK_ID:-}"
+    task_status="timeout"
+    replay_out="${PR_DELIVERY_REPLAY:-$(collect_replay_lines "${trace}")}"
+  fi
+  pr_flow_done=true
+elif [[ "${fault_mode}" == "final_request_changes" ]]; then
   if [[ -z "${review_comments_rel}" ]]; then
     echo "case ${case_id}: operator.review_comments_file missing in case.yaml" >&2
     exit 1
@@ -195,7 +218,9 @@ if [[ "${must_pass_tests}" == "true" && -z "${expect_task_status}" ]]; then
 fi
 
 echo "waiting for hive loop + oracle (timeout ${timeout_secs}s)..."
-if [[ "${final_flow_done}" == "true" ]]; then
+if [[ "${pr_flow_done}" == "true" ]]; then
+  :
+elif [[ "${final_flow_done}" == "true" ]]; then
   :
 elif [[ "${standing_flow_done}" == "true" ]]; then
   :
@@ -348,6 +373,12 @@ fi
 
 passed=false
 if [[ -n "${kill_after}" ]]; then
+  if [[ "${oracle_ok}" == "true" && "${task_status}" == "${expect_task_status}" && "${event_chain_ok}" == "true" ]]; then
+    passed=true
+  fi
+elif [[ "${pr_flow_done}" == "true" ]]; then
+  # PR delivery: the worktree is gone after reconcile, so the colony-root oracle
+  # cannot run; the event chain and task status still gate the verdict.
   if [[ "${oracle_ok}" == "true" && "${task_status}" == "${expect_task_status}" && "${event_chain_ok}" == "true" ]]; then
     passed=true
   fi

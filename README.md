@@ -15,7 +15,7 @@ runner/           reset + run-case harness (Tier B)
 
 ## Status
 
-Phase 2 — Tier B cases `01`–`16` (scripted loop, energy block, first-pass, inject-mutation, kill, human reject, cue hotfix, deferred emit, kill no-redispatch, signal direct, ready-before-plan, artifacts, standing trail ticks, final request-changes rework), script bees, reset + run-case runner.
+Phase 2 — Tier B cases `01`–`17` (scripted loop, energy block, first-pass, inject-mutation, kill, human reject, cue hotfix, deferred emit, kill no-redispatch, signal direct, ready-before-plan, artifacts, standing trail ticks, final request-changes rework, pull-request delivery), script bees, reset + run-case runner.
 
 ## Quick start
 
@@ -51,5 +51,15 @@ Tier A evals live in the Paseka platform repo (`internal/runtime` tests).
 | `14-artifact-handoff` | `eval-14-artifact-handoff` | cue `feature` + `write_comb` | scout comb → builder handoff → verification |
 | `15-standing-trail-ticks` | `eval-15-standing-trail` | standing cue | two ticks reuse checkpoint, replace stipend, refuse overlap |
 | `16-final-request-changes` | `eval-16-final-request-changes` | final review comments | comments file → rework task → final gate held → approve |
+| `17-pr-delivery` | `eval-17-pr-delivery` | `pull_request` delivery | push head + forge upsert → gate held open → host merge → reconcile, no local merge |
 
 Reset model: `runner/reset.sh` purges ephemeral state (with `--reseed-energy` for task ingress; without for cue ingress), copies `cases/<id>/seed/` to repo root, commits `seedSha`, uses fixed `--trace` from `case.yaml`. Standing-trail cases run their cue twice, verify checkpoint reuse and stipend replacement, and reject an overlapping tick.
+
+## Pull-request delivery (case 17)
+
+Paseka never creates a PR itself: with `defaults.delivery: pull_request` the runtime pushes the isolated head to `origin` and execs the apiary-local `forge.command` ([spec 024](https://github.com/russ-p/paseka/blob/main/docs/specs/024-pull-request-delivery.md)). The colony keeps that hermetic:
+
+- `scripts/forge-fixture.sh` is a deterministic forge driver (v1 IPC: `capabilities`/`upsert`/`get`, no network). The runner points home `~/.config/paseka/paseka-eval-colony/config.yaml` at it and restores the file afterwards.
+- `origin` is swapped for a local bare repo (`.eval/forge-origin.git`) for the case window, so the real head push never reaches GitHub.
+- The final gate stays `waiting_review` after publish; the runner marks the PR merged (`.eval/forge/<trace>.merged`) and `paseka run` reconcile (30 s ticker) closes the trail with `task.completed` from `agent=runtime`.
+- The deliverable is the pushed head, so the oracle clones the branch from the bare origin and runs `go test ./pkg/...` there; the colony checkout must stay on the broken seed. The leftover local head branch is removed by the next `purge`.

@@ -1,0 +1,47 @@
+id: 17-pr-delivery
+trace: eval-17-pr-delivery
+seed: seed/
+ingress:
+  mode: task
+task:
+  title: "Add sum and deliver as a pull request"
+  bee: builder
+  intent: test-fix
+  review: none
+fault:
+  mode: pr_delivery
+# defaults.delivery is colony-wide, so the runner patches .paseka/colony.yaml for the
+# case window only and restores it on exit (see docs/specs/024-pull-request-delivery.md).
+defaults:
+  delivery: pull_request
+energy:
+  topup: 0
+operator:
+  pr_title: "eval: add Sum via pull request"
+  draft: true
+score:
+  # The change lands as a pushed head, not on the colony default branch, so the
+  # standard root/worktree oracle does not apply: the pushed head is cloned and tested.
+  must_pass_tests: false
+  expect_task_status: completed
+  expect_pr_body_marker: "eval-17 pull request body"
+  expect_no_local_merge: true
+oracle:
+  command: "go test ./pkg/..."
+  workdir: "."
+  expect_event_chain:
+    - type: INSIGHT
+      kind: task.plan
+    - type: SIGNAL
+      kind: task.ready
+    - type: INSIGHT
+      kind: pr.body
+    - type: MUTATION
+      kind: code.proposal.isolated
+    - type: VERIFICATION
+      kind: verification.success
+    - type: VERIFICATION
+      kind: task.completed
+    - type: VERIFICATION
+      kind: task.completed
+timeout: 10m

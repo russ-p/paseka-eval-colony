@@ -1,7 +1,5 @@
 package calc
 
 func Sum(a, b int) int {
-	return a + b
+	return 0
 }
-
-// revised after human.feedback

@@ -109,6 +109,16 @@ elif field == "score_expect_pr_body_marker":
     print(nested("score", "expect_pr_body_marker") or "")
 elif field == "score_expect_no_local_merge":
     print(nested("score", "expect_no_local_merge") or "")
+elif field == "worktree_branch":
+    print(nested("worktree", "branch") or "")
+elif field == "worktree_reject_branch":
+    print(nested("worktree", "reject_branch") or "")
+elif field == "worktree_second_task":
+    print(nested("worktree", "second_task") or "")
+elif field == "score_expect_reuse":
+    print(nested("score", "expect_reuse") or "")
+elif field == "score_expect_no_origin_push":
+    print(nested("score", "expect_no_origin_push") or "")
 elif field == "score_expect_rework_task":
     print(nested("score", "expect_rework_task") or "")
 elif field == "score_expect_bee":
@@ -339,6 +349,25 @@ path.write_text(text)
 PY
 }
 
+# purge_custom_worktree_branch drops the branch a previous 018-style case renamed the
+# worktree to. It does not match the paseka/eval-* pattern that purge_colony sweeps,
+# and a surviving branch makes worktree.Ensure fail closed with
+# `worktree: branch %q already exists` on the next run.
+purge_custom_worktree_branch() {
+  local branch_file="${EVAL_META_DIR}/worktree-branch"
+  local branch
+  [[ -f "${branch_file}" ]] || return 0
+  branch="$(cat "${branch_file}")"
+  if [[ -z "${branch}" ]]; then
+    return 0
+  fi
+  if git -C "${EVAL_ROOT}" show-ref --verify --quiet "refs/heads/${branch}"; then
+    git -C "${EVAL_ROOT}" branch -D -- "${branch}" >/dev/null 2>&1 || true
+    echo "reset: dropped stale worktree branch ${branch}"
+  fi
+  return 0
+}
+
 set_colony_delivery() {
   # defaults.delivery is colony-wide, so a pull_request case patches it for the case
   # window only. Colony.yaml is restored by restore_colony_config on reset/exit.
@@ -524,6 +553,7 @@ reset_case() {
   require_case "$case_id"
   local trace_id fault_mode energy_budget energy_topup ingress_mode delivery
   local hold_secs kill_after watcher_hold_secs
+  local worktree_branch worktree_reject_branch
   trace_id="$(read_case_field "$case_id" trace)"
   fault_mode="$(read_case_field "$case_id" fault_mode)"
   energy_budget="$(read_case_field "$case_id" energy_budget)"
@@ -553,10 +583,25 @@ reset_case() {
   else
     purge_colony "${trace_id}" true
   fi
+  purge_custom_worktree_branch
   materialize_seed "$case_id"
   # Bare origin gets the post-seed HEAD so the pushed head has a real base branch.
   if [[ -n "${delivery}" ]]; then
     enable_forge_fixture
+  fi
+  # Worktree-branch knobs for 018: branch names the builder emits as INSIGHT and the
+  # invalid ref it must fail to emit.
+  worktree_branch="$(read_case_field "$case_id" worktree_branch)"
+  worktree_reject_branch="$(read_case_field "$case_id" worktree_reject_branch)"
+  rm -f "${EVAL_META_DIR}/worktree-branch" "${EVAL_META_DIR}/worktree-reject-branch" \
+    "${EVAL_META_DIR}/builder-branch-1" "${EVAL_META_DIR}/builder-branch-2" \
+    "${EVAL_META_DIR}/branch-reject"
+  if [[ -n "${worktree_branch}" ]]; then
+    mkdir -p "${EVAL_META_DIR}"
+    echo "${worktree_branch}" > "${EVAL_META_DIR}/worktree-branch"
+    if [[ -n "${worktree_reject_branch}" ]]; then
+      echo "${worktree_reject_branch}" > "${EVAL_META_DIR}/worktree-reject-branch"
+    fi
   fi
   echo "${fault_mode}" > "${EVAL_META_DIR}/fault-mode"
   # Kill cases need an in-flight adapter window; default 30s when kill_after is set.
@@ -1540,6 +1585,85 @@ mark_forge_pr_merged() {
   touch "${FORGE_STATE_DIR}/${trace_id}.merged"
 }
 
+homestate_worktree_field() {
+  local trace_id="$1"
+  local field="$2"
+  python3 - "$(dirname "${HOME_CONFIG}")/state.json" "${trace_id}" "${field}" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+trace, field = sys.argv[2], sys.argv[3]
+if not path.exists():
+    raise SystemExit(0)
+state = json.loads(path.read_text())
+for entry in state.get("worktrees") or []:
+    if entry.get("traceId") == trace:
+        value = entry.get(field, "")
+        print("" if value is None else value)
+        break
+PY
+}
+
+homestate_worktree_count() {
+  local trace_id="$1"
+  python3 - "$(dirname "${HOME_CONFIG}")/state.json" "${trace_id}" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+trace = sys.argv[2]
+count = 0
+if path.exists():
+    state = json.loads(path.read_text())
+    count = sum(1 for e in (state.get("worktrees") or []) if e.get("traceId") == trace)
+print(count)
+PY
+}
+
+worktree_head_branch() {
+  local trace_id="$1"
+  local dir
+  dir="$(worktree_for_trace "${trace_id}")"
+  [[ -d "${dir}" ]] || return 1
+  git -C "${dir}" rev-parse --abbrev-ref HEAD
+}
+
+wait_for_worktree_branch() {
+  local trace_id="$1"
+  local want_branch="$2"
+  local timeout_secs="$3"
+  local start now branch=""
+  start=$(date +%s)
+  while true; do
+    branch="$(worktree_head_branch "${trace_id}" 2>/dev/null || true)"
+    if [[ "${branch}" == "${want_branch}" ]]; then
+      echo "${branch}"
+      return 0
+    fi
+    now=$(date +%s)
+    if (( now - start >= timeout_secs )); then
+      echo "${branch:-missing}"
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+export_branch_line() {
+  # `paseka export` is offline but writes into cwd, so run it in a scratch dir.
+  local trace_id="$1"
+  local scratch line=""
+  scratch="$(mktemp -d)"
+  (cd "${scratch}" && paseka export --trace "${trace_id}" --format md -C "${EVAL_ROOT}" >/dev/null 2>&1) || true
+  line="$(grep -hE '^-[[:space:]]\*\*Branch:\*\*' "${scratch}"/*.md 2>/dev/null \
+    | head -1 | sed 's/^-[[:space:]]\*\*Branch:\*\*[[:space:]]*//' || true)"
+  rm -rf "${scratch}"
+  printf '%s' "${line}"
+}
+
 origin_has_branch() {
   local branch="$1"
   git -C "${EVAL_ROOT}" ls-remote --heads origin "refs/heads/${branch}" 2>/dev/null | grep -q .
@@ -1833,6 +1957,213 @@ check_pr_head_tests() {
   fi
   rm -rf "${tmp}"
   echo "pr head oracle: ${cmd} passed on pushed head ${branch}"
+  return 0
+}
+
+# run_worktree_branch_flow drives 018: first isolated dispatch creates the worktree on
+# the default branch, the builder's INSIGHT/worktree.branch renames it in place, and a
+# second task in the same trail reuses that worktree without reverting the name.
+run_worktree_branch_flow() {
+  local case_id="$1"
+  local trace_id="$2"
+  local task_body_file="$3"
+  local timeout_secs="$4"
+  local title="$5"
+  local bee="$6"
+  local intent="$7"
+  local review="$8"
+  local want_branch="$9"
+  local second="${10}"
+  local create_out first_task second_out second_task status observed
+
+  WORKTREE_BRANCH_TASK_ID=""
+  WORKTREE_BRANCH_SECOND_TASK_ID=""
+  WORKTREE_BRANCH_DEFAULT="paseka/${trace_id}"
+  WORKTREE_BRANCH_WANTED="${want_branch}"
+  WORKTREE_BRANCH_REPLAY=""
+
+  create_out="$(paseka task create --trace "${trace_id}" --title "${title}" \
+    --file "${task_body_file}" --bee "${bee}" --intent "${intent}" --review "${review}" \
+    --autorun -C "${EVAL_ROOT}" 2>&1)" || {
+    echo "${create_out}" >&2
+    WORKTREE_BRANCH_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  }
+  echo "${create_out}"
+  first_task="$(printf '%s\n' "${create_out}" | awk '/^  task:/{print $2; exit}')"
+  if [[ -z "${first_task}" ]]; then
+    echo "worktree branch oracle: initial task id missing" >&2
+    WORKTREE_BRANCH_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  WORKTREE_BRANCH_TASK_ID="${first_task}"
+  echo "first task=${first_task}"
+  if ! wait_for_success_scoring "${case_id}" "${trace_id}" "${first_task}" completed "${timeout_secs}" >/dev/null; then
+    echo "worktree branch oracle: first task did not complete" >&2
+    WORKTREE_BRANCH_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+
+  if ! status="$(wait_for_worktree_branch "${trace_id}" "${want_branch}" "${timeout_secs}")"; then
+    echo "worktree branch oracle: branch=${status}, want ${want_branch}" >&2
+    WORKTREE_BRANCH_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  echo "worktree branch renamed to ${status}"
+
+  if [[ "${second}" == "true" ]]; then
+    second_out="$(paseka task create --trace "${trace_id}" --title "${title} (reuse)" \
+      --file "${task_body_file}" --bee "${bee}" --intent "${intent}" --review "${review}" \
+      --autorun -C "${EVAL_ROOT}" 2>&1)" || {
+      echo "${second_out}" >&2
+      WORKTREE_BRANCH_REPLAY="$(collect_replay_lines "${trace_id}")"
+      return 1
+    }
+    echo "${second_out}"
+    second_task="$(printf '%s\n' "${second_out}" | awk '/^  task:/{print $2; exit}')"
+    if [[ -z "${second_task}" || "${second_task}" == "${first_task}" ]]; then
+      echo "worktree branch oracle: second task id=${second_task@Q}" >&2
+      WORKTREE_BRANCH_REPLAY="$(collect_replay_lines "${trace_id}")"
+      return 1
+    fi
+    WORKTREE_BRANCH_SECOND_TASK_ID="${second_task}"
+    echo "second task=${second_task}"
+    if ! wait_for_success_scoring "${case_id}" "${trace_id}" "${second_task}" completed "${timeout_secs}" >/dev/null; then
+      echo "worktree branch oracle: second task did not complete" >&2
+      WORKTREE_BRANCH_REPLAY="$(collect_replay_lines "${trace_id}")"
+      return 1
+    fi
+    observed="$(cat "${EVAL_META_DIR}/builder-branch-2" 2>/dev/null || true)"
+    if [[ "${observed}" != "${want_branch}" ]]; then
+      echo "worktree branch oracle: second dispatch saw branch=${observed:-missing}, want ${want_branch}" >&2
+      WORKTREE_BRANCH_REPLAY="$(collect_replay_lines "${trace_id}")"
+      return 1
+    fi
+    echo "second dispatch reused ${observed}"
+  fi
+
+  WORKTREE_BRANCH_REPLAY="$(collect_replay_lines "${trace_id}")"
+  return 0
+}
+
+# check_worktree_branch_oracle scores the worktree-branch contract: default name at
+# create, in-place rename by INSIGHT/worktree.branch, reuse by the next dispatch, one
+# worktree per trail, and no push (this case stays on local_merge).
+check_worktree_branch_oracle() {
+  local trace_id="$1"
+  local expect_reuse="$2"
+  local expect_no_origin_push="$3"
+  local dir head_branch default_branch entries seed_sha export_line
+  local branches proposals successes observed_first observed_second
+
+  dir="$(worktree_for_trace "${trace_id}")"
+  default_branch="${WORKTREE_BRANCH_DEFAULT}"
+  if [[ ! -d "${dir}" ]]; then
+    echo "worktree branch oracle: worktree missing: ${dir}" >&2
+    return 1
+  fi
+  head_branch="$(worktree_head_branch "${trace_id}" 2>/dev/null || true)"
+  if [[ "${head_branch}" != "${WORKTREE_BRANCH_WANTED}" ]]; then
+    echo "worktree branch oracle: worktree head branch=${head_branch@Q}, want ${WORKTREE_BRANCH_WANTED@Q}" >&2
+    return 1
+  fi
+  if ! git -C "${EVAL_ROOT}" worktree list --porcelain | grep -q "^worktree ${dir}$"; then
+    echo "worktree branch oracle: ${dir} missing from git worktree list" >&2
+    return 1
+  fi
+  # The default ref must be gone: the branch was renamed, not replaced.
+  if git -C "${EVAL_ROOT}" show-ref --verify --quiet "refs/heads/${default_branch}"; then
+    echo "worktree branch oracle: default branch ${default_branch} still exists (rename expected)" >&2
+    return 1
+  fi
+  entries="$(git -C "${EVAL_ROOT}" worktree list --porcelain | grep -c '^worktree ' || true)"
+  if [[ "${entries}" != "2" ]]; then
+    echo "worktree branch oracle: ${entries} worktrees registered, want 2 (colony root + this trail)" >&2
+    return 1
+  fi
+
+  if [[ "$(homestate_worktree_count "${trace_id}")" != "1" ]]; then
+    echo "worktree branch oracle: registry has $(homestate_worktree_count "${trace_id}") entries for ${trace_id}, want 1" >&2
+    return 1
+  fi
+  if [[ "$(homestate_worktree_field "${trace_id}" branch)" != "${WORKTREE_BRANCH_WANTED}" ]]; then
+    echo "worktree branch oracle: registry branch=$(homestate_worktree_field "${trace_id}" branch@Q), want ${WORKTREE_BRANCH_WANTED@Q}" >&2
+    return 1
+  fi
+  if [[ "$(homestate_worktree_field "${trace_id}" path)" != "${dir}" ]]; then
+    echo "worktree branch oracle: registry path=$(homestate_worktree_field "${trace_id}" path@Q), want ${dir@Q}" >&2
+    return 1
+  fi
+  seed_sha="$(cat "${EVAL_META_DIR}/seed-sha" 2>/dev/null || true)"
+  if [[ -n "${seed_sha}" && "$(homestate_worktree_field "${trace_id}" baseSha)" != "${seed_sha}" ]]; then
+    echo "worktree branch oracle: registry baseSha=$(homestate_worktree_field "${trace_id}" baseSha), want seed ${seed_sha}" >&2
+    return 1
+  fi
+
+  observed_first="$(cat "${EVAL_META_DIR}/builder-branch-1" 2>/dev/null || true)"
+  if [[ "${observed_first}" != "${default_branch}" ]]; then
+    echo "worktree branch oracle: first dispatch branch=${observed_first:-missing}, want default ${default_branch}" >&2
+    return 1
+  fi
+  if [[ -f "${EVAL_META_DIR}/branch-reject" ]]; then
+    if ! grep -q 'schema_validation_failed' "${EVAL_META_DIR}/branch-reject"; then
+      echo "worktree branch oracle: invalid branch ref was not refused at emit" >&2
+      cat "${EVAL_META_DIR}/branch-reject" >&2
+      return 1
+    fi
+  fi
+
+  if [[ "${expect_reuse}" == "true" ]]; then
+    observed_second="$(cat "${EVAL_META_DIR}/builder-branch-2" 2>/dev/null || true)"
+    if [[ "${observed_second}" != "${WORKTREE_BRANCH_WANTED}" ]]; then
+      echo "worktree branch oracle: second dispatch branch=${observed_second:-missing}, want ${WORKTREE_BRANCH_WANTED}" >&2
+      return 1
+    fi
+  fi
+
+  export_line="$(export_branch_line "${trace_id}")"
+  if [[ "${export_line}" != "${WORKTREE_BRANCH_WANTED}" ]]; then
+    echo "worktree branch oracle: export branch=${export_line@Q}, want ${WORKTREE_BRANCH_WANTED@Q}" >&2
+    return 1
+  fi
+
+  # Both dispatch changes must live on the worktree branch only.
+  local worktree_calc="${dir}/pkg/calc/calc.go"
+  if [[ -f "${worktree_calc}" ]]; then
+    if ! grep -q 'return a + b' "${worktree_calc}"; then
+      echo "worktree branch oracle: first change missing on the worktree branch" >&2
+      return 1
+    fi
+    if ! grep -q 'func Product' "${worktree_calc}"; then
+      echo "worktree branch oracle: reuse dispatch did not amend the same worktree file" >&2
+      return 1
+    fi
+  fi
+  if grep -q 'func Product' "${EVAL_ROOT}/pkg/calc/calc.go" 2>/dev/null; then
+    echo "worktree branch oracle: worktree change leaked onto the colony default branch" >&2
+    return 1
+  fi
+
+  branches="$(replay_event_count "${WORKTREE_BRANCH_REPLAY}" INSIGHT worktree.branch)"
+  proposals="$(replay_event_count "${WORKTREE_BRANCH_REPLAY}" MUTATION code.proposal.isolated)"
+  successes="$(replay_event_count "${WORKTREE_BRANCH_REPLAY}" VERIFICATION verification.success)"
+  [[ "${branches}" == "1" ]] || { echo "worktree branch oracle: worktree.branch count=${branches}, want 1" >&2; return 1; }
+  [[ "${proposals}" == "2" ]] || { echo "worktree branch oracle: isolated proposal count=${proposals}, want 2" >&2; return 1; }
+  [[ "${successes}" == "2" ]] || { echo "worktree branch oracle: verification.success count=${successes}, want 2" >&2; return 1; }
+
+  if [[ "${expect_no_origin_push}" == "true" ]]; then
+    if git -C "${EVAL_ROOT}" ls-remote --heads origin >/dev/null 2>&1; then
+      if origin_has_branch "${WORKTREE_BRANCH_WANTED}" || origin_has_branch "${default_branch}"; then
+        echo "worktree branch oracle: worktree branch was pushed to origin" >&2
+        return 1
+      fi
+      echo "worktree branch oracle: nothing pushed to origin"
+    else
+      echo "worktree branch oracle: origin unreachable, skipped no-push check"
+    fi
+  fi
+
+  echo "worktree branch oracle: ${default_branch} → ${WORKTREE_BRANCH_WANTED}, reused on second dispatch, local only"
   return 0
 }
 

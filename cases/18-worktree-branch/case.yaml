@@ -1,0 +1,53 @@
+id: 18-worktree-branch
+trace: eval-18-worktree-branch
+seed: seed/
+ingress:
+  mode: task
+task:
+  title: "Add sum on a renamed worktree branch"
+  bee: builder
+  intent: test-fix
+  review: none
+fault:
+  mode: worktree_branch
+# The builder emits INSIGHT/worktree.branch, and the reactor renames the live
+# worktree in place (docs/specs/020-worktree-branch.md). reject_branch is the
+# invalid-ref probe: `paseka event emit` must refuse it without touching the branch.
+worktree:
+  branch: feature/eval-18-live-bees
+  reject_branch: main
+  second_task: true
+energy:
+  topup: 0
+score:
+  must_pass_tests: true
+  expect_task_status: completed
+  expect_reuse: true
+  expect_no_origin_push: true
+oracle:
+  command: "go test ./pkg/..."
+  workdir: "."
+  expect_event_chain:
+    - type: INSIGHT
+      kind: task.plan
+    - type: SIGNAL
+      kind: task.ready
+    - type: INSIGHT
+      kind: worktree.branch
+    - type: MUTATION
+      kind: code.proposal.isolated
+    - type: VERIFICATION
+      kind: verification.success
+    - type: VERIFICATION
+      kind: task.completed
+    - type: INSIGHT
+      kind: task.plan
+    - type: SIGNAL
+      kind: task.ready
+    - type: MUTATION
+      kind: code.proposal.isolated
+    - type: VERIFICATION
+      kind: verification.success
+    - type: VERIFICATION
+      kind: task.completed
+timeout: 10m

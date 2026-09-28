@@ -15,7 +15,7 @@ runner/           reset + run-case harness (Tier B)
 
 ## Status
 
-Phase 2 — Tier B cases `01`–`17` (scripted loop, energy block, first-pass, inject-mutation, kill, human reject, cue hotfix, deferred emit, kill no-redispatch, signal direct, ready-before-plan, artifacts, standing trail ticks, final request-changes rework, pull-request delivery), script bees, reset + run-case runner.
+Phase 2 — Tier B cases `01`–`18` (scripted loop, energy block, first-pass, inject-mutation, kill, human reject, cue hotfix, deferred emit, kill no-redispatch, signal direct, ready-before-plan, artifacts, standing trail ticks, final request-changes rework, pull-request delivery, worktree branch), script bees, reset + run-case runner.
 
 ## Quick start
 
@@ -52,8 +52,15 @@ Tier A evals live in the Paseka platform repo (`internal/runtime` tests).
 | `15-standing-trail-ticks` | `eval-15-standing-trail` | standing cue | two ticks reuse checkpoint, replace stipend, refuse overlap |
 | `16-final-request-changes` | `eval-16-final-request-changes` | final review comments | comments file → rework task → final gate held → approve |
 | `17-pr-delivery` | `eval-17-pr-delivery` | `pull_request` delivery | push head + forge upsert → gate held open → host merge → reconcile, no local merge |
+| `18-worktree-branch` | `eval-18-worktree-branch` | `worktree.branch` rename | default `paseka/<trace>` → in-place rename → second task reuses the worktree, nothing pushed |
 
 Reset model: `runner/reset.sh` purges ephemeral state (with `--reseed-energy` for task ingress; without for cue ingress), copies `cases/<id>/seed/` to repo root, commits `seedSha`, uses fixed `--trace` from `case.yaml`. Standing-trail cases run their cue twice, verify checkpoint reuse and stipend replacement, and reject an overlapping tick.
+
+## Worktree branch (case 18)
+
+The runtime creates `.paseka/worktrees/<traceId>/` on `paseka/<traceId>` and renames it in place when a bee emits `INSIGHT/worktree.branch` ([spec 020](https://github.com/russ-p/paseka/blob/main/docs/specs/020-worktree-branch.md)). The case pins: default name at create, rename (the default ref must disappear), `state.json` registry `branch`/`baseSha`/`path`, the `- **Branch:**` row of `paseka export`, reuse by a second task in the same trail, and a rejected `event emit` for a reserved ref.
+
+Reuse needs a real second change: the runtime publishes only each run's **attributable** diff (per-file baseline hashes), so a follow-up task that rewrites identical content produces no proposal. `cases/<id>/expect2/` holds the tree for such a follow-up dispatch. A renamed worktree branch also escapes the `paseka/eval-*` sweep in `purge_colony`, so reset drops the branch named in `.eval/worktree-branch` explicitly — otherwise `worktree.Ensure` fails closed with `branch already exists`.
 
 ## Pull-request delivery (case 17)
 

@@ -8,7 +8,8 @@
 # write_comb (014: write trail comb then expect; scan-flush on success),
 # write_comb_fail (014: write comb then exit 1 — no artifact.written),
 # deferred_artifact (014+015: --defer artifact.written; scan flush skipped when deferred pending),
-# pr_delivery (017: expect on run 1 + INSIGHT pr.body so the publish path has a body to resolve).
+# pr_delivery (017: expect on run 1 + INSIGHT pr.body so the publish path has a body to resolve),
+# worktree_branch (018: expect + INSIGHT worktree.branch rename, then reuse on a second task).
 set -euo pipefail
 
 root="${PASEKA_COLONY_ROOT:?missing PASEKA_COLONY_ROOT}"
@@ -64,6 +65,17 @@ apply_expect() {
   else
     echo "eval builder: no expect/ directory for run ${runs}" >&2
     exit 1
+  fi
+}
+
+apply_expect2() {
+  # Second-dispatch tree for reuse cases (018): the runtime attributes only the diff
+  # of each run, so a follow-up task must change something new on the same branch.
+  if [[ -d "${case_dir}/expect2/pkg" ]]; then
+    rsync -a "${case_dir}/expect2/pkg/" "${workspace}/pkg/"
+    echo "eval builder: applied expect2/ tree (run ${runs})"
+  else
+    apply_expect
   fi
 }
 
@@ -140,6 +152,64 @@ PY
   echo "eval builder: pr.body → ${emit_out}"
 }
 
+record_worktree_branch() {
+  # 018: the dispatch runs inside the trace worktree; record what branch it saw so
+  # the oracle can prove creation (paseka/<trace>) and reuse (custom name) separately.
+  local label="$1"
+  git -C "${workspace}" rev-parse --abbrev-ref HEAD > "${eval_dir}/builder-branch-${label}"
+  echo "eval builder: run ${runs} on branch $(cat "${eval_dir}/builder-branch-${label}")"
+}
+
+emit_branch_insight() {
+  # 018: INSIGHT/worktree.branch renames the live worktree in place. `paseka event
+  # emit` writes the audit entry that later resolution (merge, merge-diff) reads.
+  local branch="$1"
+  local emit_out
+  emit_out="$(BRANCH="${branch}" python3 - <<'PY' | paseka event emit --stdin -C "${root}"
+import json
+import os
+
+print(json.dumps({
+    "traceId": os.environ["PASEKA_TRACE_ID"],
+    "agentId": os.environ["PASEKA_AGENT_ID"],
+    "type": "INSIGHT",
+    "payload": {
+        "kind": "worktree.branch",
+        "branch": os.environ["BRANCH"],
+    },
+}))
+PY
+)"
+  echo "eval builder: worktree.branch ${branch} → ${emit_out}"
+}
+
+emit_rejected_branch_insight() {
+  # 018: an invalid/reserved ref must be refused at emit time (schema_validation_failed)
+  # so the worktree branch is never touched. The non-zero exit is expected here.
+  local branch="$1"
+  local emit_out rc
+  set +e
+  emit_out="$(BRANCH="${branch}" python3 - <<'PY' | paseka event emit --stdin -C "${root}"
+import json
+import os
+
+print(json.dumps({
+    "traceId": os.environ["PASEKA_TRACE_ID"],
+    "agentId": os.environ["PASEKA_AGENT_ID"],
+    "type": "INSIGHT",
+    "payload": {
+        "kind": "worktree.branch",
+        "branch": os.environ["BRANCH"],
+    },
+}))
+PY
+)"
+  rc=$?
+  set -e
+  echo "${emit_out}" > "${eval_dir}/branch-reject"
+  echo "eval builder: worktree.branch ${branch} refused as expected (rc=${rc})"
+}
+
 if [[ "${fault_mode}" == "write_comb_fail" ]]; then
   write_eval_comb
   echo "eval builder: write_comb_fail exiting 1 (no artifact.written flush)" >&2
@@ -164,6 +234,25 @@ elif [[ "${fault_mode}" == "write_comb" ]]; then
   else
     write_eval_comb
     apply_expect
+  fi
+elif [[ "${fault_mode}" == "worktree_branch" ]]; then
+  # 018: the first dispatch creates .paseka/worktrees/<trace> on the default branch;
+  # the insight renames it in place. A later dispatch must reuse the same worktree,
+  # keep the custom name, and contribute a new attributable diff (expect2/).
+  if [[ "${runs}" -eq 1 ]]; then
+    apply_expect
+    record_worktree_branch "${runs}"
+    branch_name="$(cat "${eval_dir}/worktree-branch")"
+    reject_name="$(cat "${eval_dir}/worktree-reject-branch")"
+    if [[ -n "${branch_name}" ]]; then
+      emit_branch_insight "${branch_name}"
+    fi
+    if [[ -n "${reject_name}" ]]; then
+      emit_rejected_branch_insight "${reject_name}"
+    fi
+  else
+    apply_expect2
+    record_worktree_branch "${runs}"
   fi
 elif [[ "${fault_mode}" == "pr_delivery" ]]; then
   apply_expect

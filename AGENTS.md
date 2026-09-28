@@ -35,6 +35,7 @@ paseka init                              # idempotent
 - **Materialized seed is committed** — `runner/reset.sh` copies `cases/<id>/seed/` to repo root and commits `seedSha` before worktree creation.
 - **Score the oracle, not task status alone** — with `review: none`, runtime may mark the task `completed` before guard→builder rework finishes; `run-case.sh` polls worktree tests.
 - **PR delivery rewrites machine-local config** — a case with `defaults.delivery: pull_request` makes `reset.sh` patch `.paseka/colony.yaml`, point home `~/.config/paseka/paseka-eval-colony/config.yaml` at `scripts/forge-fixture.sh`, and swap `origin` for `.eval/forge-origin.git`. `restore_colony_config` (reset start + `run-case.sh` exit trap) reverts all three; do not hand-edit those files while a PR case runs.
+- **Renamed worktree branches outlive purge** — `worktree.branch` cases (018) move the worktree to a case name that `paseka/eval-*` does not match, so `purge_custom_worktree_branch` drops it from `.eval/worktree-branch`; a survivor makes the next `worktree.Ensure` fail closed with `branch already exists`.
 - **Do not commit** `.eval/`, `reports/`, `.paseka/runs/`, `.paseka/worktrees/`, or machine-local apiary state.
 
 ## Adding a case
@@ -43,8 +44,9 @@ paseka init                              # idempotent
 2. `cases/<id>/seed/` — tiny baseline tree (usually `go.mod` + one package).
 3. `cases/<id>/broken/` — intentional bad fix for scripted fault injection.
 4. `cases/<id>/expect/` — correct tree for builder rework pass.
-5. `cases/<id>/task.body` — task text for `paseka task create --file`, or cue text for `paseka cue run` when `ingress.mode: cue`. Signal cues (`emit: signal`) create no ledger task at ingress; score on scout dispatch (`expect_scout_run`) unless the case later emits `task.plan` (set `task.id` for hive scoring).
-6. `cases/<id>/pr-body.md` — only for `defaults.delivery: pull_request`: the builder emits it as `INSIGHT pr.body` so publish resolves a body without a `--pr-body` overlay.
+5. `cases/<id>/expect2/` — optional: tree for a second dispatch in the same trail (worktree reuse). Required whenever a follow-up task must publish a proposal, because the runtime only attributes the files a run actually changed.
+6. `cases/<id>/task.body` — task text for `paseka task create --file`, or cue text for `paseka cue run` when `ingress.mode: cue`. Signal cues (`emit: signal`) create no ledger task at ingress; score on scout dispatch (`expect_scout_run`) unless the case later emits `task.plan` (set `task.id` for hive scoring).
+7. `cases/<id>/pr-body.md` — only for `defaults.delivery: pull_request`: the builder emits it as `INSIGHT pr.body` so publish resolves a body without a `--pr-body` overlay.
 
 Run: `./runner/run-case.sh <id>`.
 

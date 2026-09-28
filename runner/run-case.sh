@@ -48,6 +48,10 @@ pr_title="$(read_case_field "${case_id}" operator_pr_title)"
 pr_draft="$(read_case_field "${case_id}" operator_pr_draft)"
 expect_pr_body_marker="$(read_case_field "${case_id}" score_expect_pr_body_marker)"
 expect_no_local_merge="$(read_case_field "${case_id}" score_expect_no_local_merge)"
+worktree_branch="$(read_case_field "${case_id}" worktree_branch)"
+worktree_second_task="$(read_case_field "${case_id}" worktree_second_task)"
+expect_reuse="$(read_case_field "${case_id}" score_expect_reuse)"
+expect_no_origin_push="$(read_case_field "${case_id}" score_expect_no_origin_push)"
 task_body_file="$(case_dir_for "${case_id}")/task.body"
 
 if [[ "${ingress_mode}" != "cue" && -z "${title}" ]]; then
@@ -90,10 +94,35 @@ fi
 
 oracle_ok=false
 replay_out=""
+worktree_flow_done=false
 pr_flow_done=false
 final_flow_done=false
 standing_flow_done=false
-if [[ "${fault_mode}" == "pr_delivery" ]]; then
+if [[ "${fault_mode}" == "worktree_branch" ]]; then
+  if [[ -z "${worktree_branch}" ]]; then
+    echo "case ${case_id}: worktree.branch missing in case.yaml" >&2
+    exit 1
+  fi
+  if run_worktree_branch_flow "${case_id}" "${trace}" "${task_body_file}" "${timeout_secs}" \
+    "${title}" "${bee}" "${intent}" "${review}" "${worktree_branch}" "${worktree_second_task}"; then
+    if [[ -n "${WORKTREE_BRANCH_SECOND_TASK_ID}" ]]; then
+      task_id="${WORKTREE_BRANCH_SECOND_TASK_ID}"
+    else
+      task_id="${WORKTREE_BRANCH_TASK_ID}"
+    fi
+    task_status="$(task_show_field "${trace}" "${task_id}" status)"
+    replay_out="${WORKTREE_BRANCH_REPLAY}"
+    if check_worktree_branch_oracle "${trace}" "${expect_reuse}" "${expect_no_origin_push}" && \
+      run_oracle "${case_id}" "${trace}"; then
+      oracle_ok=true
+    fi
+  else
+    task_id="${WORKTREE_BRANCH_TASK_ID:-}"
+    task_status="timeout"
+    replay_out="${WORKTREE_BRANCH_REPLAY:-$(collect_replay_lines "${trace}")}"
+  fi
+  worktree_flow_done=true
+elif [[ "${fault_mode}" == "pr_delivery" ]]; then
   if run_pr_delivery_flow "${case_id}" "${trace}" "${task_body_file}" "${timeout_secs}" \
     "${title}" "${bee}" "${intent}" "${review}" "${pr_title}" "${pr_draft}"; then
     task_id="${PR_DELIVERY_TASK_ID}"
@@ -218,7 +247,9 @@ if [[ "${must_pass_tests}" == "true" && -z "${expect_task_status}" ]]; then
 fi
 
 echo "waiting for hive loop + oracle (timeout ${timeout_secs}s)..."
-if [[ "${pr_flow_done}" == "true" ]]; then
+if [[ "${worktree_flow_done}" == "true" ]]; then
+  :
+elif [[ "${pr_flow_done}" == "true" ]]; then
   :
 elif [[ "${final_flow_done}" == "true" ]]; then
   :

@@ -1,0 +1,37 @@
+id: 19-clean-shutdown
+trace: eval-19-clean-shutdown
+seed: seed/
+ingress:
+  mode: task
+task:
+  title: "Add sum, but the runtime stops mid-flight"
+  bee: builder
+  intent: test-fix
+  review: none
+fault:
+  mode: clean_shutdown
+energy:
+  topup: 0
+operator:
+  # Long enough to keep one bee run in flight across all three shutdown windows.
+  builder_hold_secs: 60
+score:
+  # The case scores process lifecycle, not code: the isolated proposal never lands,
+  # so there is no worktree test and the task is expected to stay `running`
+  # (no startup recovery, no re-dispatch).
+  must_pass_tests: false
+  expect_task_status: running
+  expect_stale_after_kill: true
+oracle:
+  command: "true"
+  workdir: "."
+  expect_event_chain:
+    - type: INSIGHT
+      kind: task.plan
+    - type: SIGNAL
+      kind: task.ready
+    - type: SIGNAL
+      kind: energy.consume
+    - type: SIGNAL
+      kind: task.status
+timeout: 10m

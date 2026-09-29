@@ -9,7 +9,8 @@
 # write_comb_fail (014: write comb then exit 1 — no artifact.written),
 # deferred_artifact (014+015: --defer artifact.written; scan flush skipped when deferred pending),
 # pr_delivery (017: expect on run 1 + INSIGHT pr.body so the publish path has a body to resolve),
-# worktree_branch (018: expect + INSIGHT worktree.branch rename, then reuse on a second task).
+# worktree_branch (018: expect + INSIGHT worktree.branch rename, then reuse on a second task),
+# clean_shutdown (019: stay in flight via the hold window, touch no code).
 set -euo pipefail
 
 root="${PASEKA_COLONY_ROOT:?missing PASEKA_COLONY_ROOT}"
@@ -235,6 +236,11 @@ elif [[ "${fault_mode}" == "write_comb" ]]; then
     write_eval_comb
     apply_expect
   fi
+elif [[ "${fault_mode}" == "clean_shutdown" ]]; then
+  # 019: the case scores runtime lifecycle, not code. The hold above keeps this run
+  # in flight while the runtime is signalled; mark the run and leave the workspace
+  # untouched so the worktree never produces a proposal.
+  echo "in-flight ${PASEKA_TRACE_ID} ${PASEKA_AGENT_ID}" > "${eval_dir}/builder-inflight"
 elif [[ "${fault_mode}" == "worktree_branch" ]]; then
   # 018: the first dispatch creates .paseka/worktrees/<trace> on the default branch;
   # the insight renames it in place. A later dispatch must reuse the same worktree,

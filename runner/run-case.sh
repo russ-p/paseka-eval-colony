@@ -52,6 +52,7 @@ worktree_branch="$(read_case_field "${case_id}" worktree_branch)"
 worktree_second_task="$(read_case_field "${case_id}" worktree_second_task)"
 expect_reuse="$(read_case_field "${case_id}" score_expect_reuse)"
 expect_no_origin_push="$(read_case_field "${case_id}" score_expect_no_origin_push)"
+expect_stale_after_kill="$(read_case_field "${case_id}" score_expect_stale_after_kill)"
 task_body_file="$(case_dir_for "${case_id}")/task.body"
 
 if [[ "${ingress_mode}" != "cue" && -z "${title}" ]]; then
@@ -67,6 +68,8 @@ cleanup() {
   restore_colony_config
   if [[ "${keep_runtime}" != "true" ]]; then
     stop_runtime
+    # Shutdown-style cases leave a bee in flight on purpose; never leak it.
+    kill_inflight_bees "${trace}"
   fi
 }
 trap cleanup EXIT
@@ -94,11 +97,29 @@ fi
 
 oracle_ok=false
 replay_out=""
+shutdown_flow_done=false
 worktree_flow_done=false
 pr_flow_done=false
 final_flow_done=false
 standing_flow_done=false
-if [[ "${fault_mode}" == "worktree_branch" ]]; then
+if [[ "${fault_mode}" == "clean_shutdown" ]]; then
+  if run_clean_shutdown_flow "${case_id}" "${trace}" "${task_body_file}" "${timeout_secs}" \
+    "${title}" "${bee}" "${intent}" "${review}"; then
+    task_id="${SHUTDOWN_TASK_ID}"
+    task_status="$(task_show_field "${trace}" "${task_id}" status)"
+    replay_out="${SHUTDOWN_REPLAY}"
+    # The task is expected to stay `running`: shutdown has no recovery pass and the
+    # orphaned run never publishes, so no code oracle applies to this case.
+    if check_clean_shutdown_oracle "${trace}" "${expect_stale_after_kill}"; then
+      oracle_ok=true
+    fi
+  else
+    task_id="${SHUTDOWN_TASK_ID:-}"
+    task_status="timeout"
+    replay_out="${SHUTDOWN_REPLAY:-$(collect_replay_lines "${trace}")}"
+  fi
+  shutdown_flow_done=true
+elif [[ "${fault_mode}" == "worktree_branch" ]]; then
   if [[ -z "${worktree_branch}" ]]; then
     echo "case ${case_id}: worktree.branch missing in case.yaml" >&2
     exit 1
@@ -247,7 +268,9 @@ if [[ "${must_pass_tests}" == "true" && -z "${expect_task_status}" ]]; then
 fi
 
 echo "waiting for hive loop + oracle (timeout ${timeout_secs}s)..."
-if [[ "${worktree_flow_done}" == "true" ]]; then
+if [[ "${shutdown_flow_done}" == "true" ]]; then
+  :
+elif [[ "${worktree_flow_done}" == "true" ]]; then
   :
 elif [[ "${pr_flow_done}" == "true" ]]; then
   :
@@ -410,6 +433,11 @@ if [[ -n "${kill_after}" ]]; then
 elif [[ "${pr_flow_done}" == "true" ]]; then
   # PR delivery: the worktree is gone after reconcile, so the colony-root oracle
   # cannot run; the event chain and task status still gate the verdict.
+  if [[ "${oracle_ok}" == "true" && "${task_status}" == "${expect_task_status}" && "${event_chain_ok}" == "true" ]]; then
+    passed=true
+  fi
+elif [[ "${shutdown_flow_done}" == "true" ]]; then
+  # Clean shutdown: the task stays `running` by contract and no code oracle applies.
   if [[ "${oracle_ok}" == "true" && "${task_status}" == "${expect_task_status}" && "${event_chain_ok}" == "true" ]]; then
     passed=true
   fi

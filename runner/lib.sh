@@ -119,6 +119,8 @@ elif field == "score_expect_reuse":
     print(nested("score", "expect_reuse") or "")
 elif field == "score_expect_no_origin_push":
     print(nested("score", "expect_no_origin_push") or "")
+elif field == "score_expect_stale_after_kill":
+    print(nested("score", "expect_stale_after_kill") or "")
 elif field == "score_expect_rework_task":
     print(nested("score", "expect_rework_task") or "")
 elif field == "score_expect_bee":
@@ -2165,6 +2167,363 @@ check_worktree_branch_oracle() {
 
   echo "worktree branch oracle: ${default_branch} → ${WORKTREE_BRANCH_WANTED}, reused on second dispatch, local only"
   return 0
+}
+
+homestate_runtime_field() {
+  # Machine-local runtime registry row; empty output means the key is absent.
+  python3 - "$(dirname "${HOME_CONFIG}")/state.json" "$1" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+field = sys.argv[2]
+state = json.loads(path.read_text()) if path.exists() else {}
+entry = state.get("runtime") or {}
+value = entry.get(field, "")
+print("" if value is None else value)
+PY
+}
+
+inflight_run_dir() {
+  # Newest run dir whose status.json still says running with a live pid.
+  python3 - "${EVAL_ROOT}/.paseka/runs/${1}" <<'PY'
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+newest = None
+if root.exists():
+    for entry in sorted(root.iterdir()):
+        status = entry / "status.json"
+        if not entry.is_dir() or not status.exists():
+            continue
+        try:
+            snap = json.loads(status.read_text())
+        except ValueError:
+            continue
+        if snap.get("state") == "running" and snap.get("pid"):
+            newest = entry
+if newest is not None:
+    print(newest)
+PY
+}
+
+pid_alive() {
+  local pid="$1"
+  [[ -n "${pid}" ]] || return 1
+  kill -0 "${pid}" >/dev/null 2>&1
+}
+
+wait_for_pid_exit() {
+  local pid="$1"
+  local timeout_secs="$2"
+  local start
+  start=$(date +%s)
+  while pid_alive "${pid}"; do
+    if (( $(date +%s) - start >= timeout_secs )); then
+      return 1
+    fi
+    sleep 1
+  done
+  return 0
+}
+
+wait_for_runtime_registered() {
+  local timeout_secs="$1"
+  local start pid
+  start=$(date +%s)
+  while true; do
+    pid="$(homestate_runtime_field pid)"
+    if [[ "${pid}" =~ ^[0-9]+$ ]] && (( pid > 0 )); then
+      echo "${pid}"
+      return 0
+    fi
+    if (( $(date +%s) - start >= timeout_secs )); then
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+runtime_status_line() {
+  paseka status -C "${EVAL_ROOT}" 2>/dev/null | grep -E '^Runtime:' | head -1
+}
+
+runtime_status_attention() {
+  paseka status -C "${EVAL_ROOT}" 2>/dev/null | sed -n '/^Attention:/,$p' | grep -E '^\s+runtime stale' | head -1
+}
+
+wait_for_inflight_run() {
+  local trace_id="$1"
+  local timeout_secs="$2"
+  local start dir
+  start=$(date +%s)
+  while true; do
+    dir="$(inflight_run_dir "${trace_id}")"
+    if [[ -n "${dir}" ]]; then
+      echo "${dir}"
+      return 0
+    fi
+    if (( $(date +%s) - start >= timeout_secs )); then
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+# run_clean_shutdown_flow drives 019 through three shutdown windows while one bee run
+# is in flight: clean SIGTERM (exit 0, registry cleared, no drain), unclean SIGKILL
+# (registry left running → `stale`), then restart (no recovery, no re-dispatch) and a
+# final clean stop that heals the registry.
+run_clean_shutdown_flow() {
+  local case_id="$1"
+  local trace_id="$2"
+  local task_body_file="$3"
+  local timeout_secs="$4"
+  local title="$5"
+  local bee="$6"
+  local intent="$7"
+  local review="$8"
+  local create_out task_id run_dir bee_pid runtime_pid log_file status_line killed_pid
+
+  SHUTDOWN_TASK_ID=""
+  SHUTDOWN_RUN_DIR=""
+  SHUTDOWN_BEE_PID=""
+  SHUTDOWN_REPLAY=""
+  log_file="${EVAL_META_DIR}/paseka-run.log"
+
+  create_out="$(paseka task create --trace "${trace_id}" --title "${title}" \
+    --file "${task_body_file}" --bee "${bee}" --intent "${intent}" --review "${review}" \
+    --autorun -C "${EVAL_ROOT}" 2>&1)" || {
+    echo "${create_out}" >&2
+    SHUTDOWN_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  }
+  echo "${create_out}"
+  task_id="$(printf '%s\n' "${create_out}" | awk '/^  task:/{print $2; exit}')"
+  if [[ -z "${task_id}" ]]; then
+    echo "shutdown oracle: task id missing" >&2
+    SHUTDOWN_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  SHUTDOWN_TASK_ID="${task_id}"
+  echo "in-flight task=${task_id}"
+
+  if ! run_dir="$(wait_for_inflight_run "${trace_id}" "$(( timeout_secs < 60 ? timeout_secs : 60 ))")"; then
+    echo "shutdown oracle: no in-flight bee run appeared" >&2
+    SHUTDOWN_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  SHUTDOWN_RUN_DIR="${run_dir}"
+  bee_pid="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["pid"])' "${run_dir}/status.json")"
+  SHUTDOWN_BEE_PID="${bee_pid}"
+  runtime_pid="$(homestate_runtime_field pid)"
+  if ! [[ "${runtime_pid}" =~ ^[0-9]+$ ]] || ! pid_alive "${runtime_pid}"; then
+    echo "shutdown oracle: runtime registry has no live pid (got ${runtime_pid@Q})" >&2
+    SHUTDOWN_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  echo "runtime pid=${runtime_pid} bee pid=${bee_pid} run_dir=${run_dir}"
+
+  # Phase A: clean SIGTERM must exit 0, log a clean stop, and clear the registry.
+  kill -TERM "${runtime_pid}"
+  if ! wait_for_pid_exit "${runtime_pid}" 30; then
+    echo "shutdown oracle: runtime pid ${runtime_pid} survived SIGTERM" >&2
+    SHUTDOWN_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  if ! grep -q 'hive runtime stopped' "${log_file}" 2>/dev/null; then
+    echo "shutdown oracle: runtime log lacks 'hive runtime stopped'" >&2
+    tail -5 "${log_file}" >&2 || true
+    SHUTDOWN_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  if [[ -n "$(homestate_runtime_field pid)" ]]; then
+    echo "shutdown oracle: runtime registry not cleared after clean stop" >&2
+    SHUTDOWN_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  status_line="$(runtime_status_line)"
+  if [[ "${status_line}" == *"alive=true"* ]]; then
+    echo "shutdown oracle: status still reports a live runtime: ${status_line}" >&2
+    SHUTDOWN_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  echo "phase A clean SIGTERM: exited, registry cleared (${status_line:-no runtime line})"
+
+  # No drain: the in-flight adapter is not signalled, its run dir stays unfinished.
+  if ! pid_alive "${bee_pid}"; then
+    echo "shutdown oracle: bee pid ${bee_pid} died with the runtime (no drain expected)" >&2
+    SHUTDOWN_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  if [[ -f "${run_dir}/result.json" || -f "${run_dir}/summary.md" ]]; then
+    echo "shutdown oracle: orphaned run dir looks finished (result.json/summary.md)" >&2
+    SHUTDOWN_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  echo "phase A no drain: bee pid ${bee_pid} alive, run dir unfinished"
+  echo "${bee_pid}" > "${EVAL_META_DIR}/shutdown-no-drain"
+  kill -KILL "${bee_pid}" >/dev/null 2>&1 || true
+  wait_for_pid_exit "${bee_pid}" 10 || true
+
+  # Phase B: SIGKILL leaves the registry claiming a running runtime with a dead pid.
+  ensure_runtime
+  if ! killed_pid="$(wait_for_runtime_registered 30)"; then
+    echo "shutdown oracle: runtime did not re-register after restart" >&2
+    SHUTDOWN_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  kill -KILL "${killed_pid}"
+  if ! wait_for_pid_exit "${killed_pid}" 30; then
+    echo "shutdown oracle: runtime pid ${killed_pid} survived SIGKILL" >&2
+    SHUTDOWN_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  if [[ "$(homestate_runtime_field status)" != "running" || "$(homestate_runtime_field pid)" != "${killed_pid}" ]]; then
+    echo "shutdown oracle: registry after SIGKILL = status $(homestate_runtime_field status@Q) pid $(homestate_runtime_field pid@Q)" >&2
+    SHUTDOWN_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  status_line="$(runtime_status_line)"
+  if [[ "${status_line}" != *"stale"* || "${status_line}" != *"alive=false"* ]]; then
+    echo "shutdown oracle: status line=${status_line@Q}, want stale + alive=false" >&2
+    SHUTDOWN_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  if [[ -z "$(runtime_status_attention)" ]]; then
+    echo "shutdown oracle: status lacks 'runtime stale' attention" >&2
+    SHUTDOWN_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  if paseka status --check -C "${EVAL_ROOT}" >/dev/null 2>&1; then
+    echo "shutdown oracle: status --check passed with a stale runtime" >&2
+    SHUTDOWN_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  echo "${killed_pid}" > "${EVAL_META_DIR}/shutdown-stale-registry"
+  echo "phase B SIGKILL: registry kept running pid=${killed_pid}, status reports stale"
+
+  # Phase C: restart performs no recovery; the task stays running and is not re-dispatched.
+  ensure_runtime
+  if ! wait_for_runtime_registered 30; then
+    echo "shutdown oracle: runtime did not re-register for phase C" >&2
+    SHUTDOWN_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  sleep 5
+  if [[ "$(task_show_field "${trace_id}" "${task_id}" status)" != "running" ]]; then
+    echo "shutdown oracle: task status=$(task_show_field "${trace_id}" "${task_id}" status@Q) after restart, want running" >&2
+    SHUTDOWN_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  if [[ "$(cat "${EVAL_META_DIR}/builder-runs")" != "1" ]]; then
+    echo "shutdown oracle: builder-runs=$(cat "${EVAL_META_DIR}/builder-runs") after restart, want 1 (no re-dispatch)" >&2
+    SHUTDOWN_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  echo "phase C restart: task still running, no re-dispatch"
+  echo "${task_id}" > "${EVAL_META_DIR}/shutdown-restart-no-recovery"
+
+  runtime_pid="$(homestate_runtime_field pid)"
+  kill -TERM "${runtime_pid}"
+  if ! wait_for_pid_exit "${runtime_pid}" 30; then
+    echo "shutdown oracle: runtime pid ${runtime_pid} survived the final SIGTERM" >&2
+    SHUTDOWN_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  if [[ -n "$(homestate_runtime_field pid)" ]]; then
+    echo "shutdown oracle: registry not cleared after the final clean stop" >&2
+    SHUTDOWN_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  echo "phase C clean stop: registry cleared again"
+  echo "clean-sigterm" > "${EVAL_META_DIR}/shutdown-clean-sigterm"
+
+  SHUTDOWN_REPLAY="$(collect_replay_lines "${trace_id}")"
+  return 0
+}
+
+# check_clean_shutdown_oracle scores the durable outcome: no runtime left behind, the
+# unfinished run dir, the task stuck in `running`, and the event chain that proves no
+# proposal was ever published for the orphaned run.
+check_clean_shutdown_oracle() {
+  local trace_id="$1"
+  local expect_stale_after_kill="$2"
+  local status_line attention plans ready consumes proposals completions
+  local run_dir status_state
+
+  for marker in shutdown-clean-sigterm shutdown-no-drain shutdown-restart-no-recovery; do
+    if [[ ! -f "${EVAL_META_DIR}/${marker}" ]]; then
+      echo "shutdown oracle: phase marker ${marker} missing (flow did not complete)" >&2
+      return 1
+    fi
+  done
+  if [[ "${expect_stale_after_kill}" == "true" && ! -f "${EVAL_META_DIR}/shutdown-stale-registry" ]]; then
+    echo "shutdown oracle: SIGKILL phase marker missing" >&2
+    return 1
+  fi
+
+  status_line="$(runtime_status_line)"
+  if [[ "${status_line}" == *"alive=true"* ]]; then
+    echo "shutdown oracle: a runtime is still alive after the case: ${status_line}" >&2
+    return 1
+  fi
+  if [[ -n "$(runtime_status_attention)" ]]; then
+    echo "shutdown oracle: stale runtime attention survived the final clean stop" >&2
+    return 1
+  fi
+  if [[ -n "$(homestate_runtime_field pid)" ]]; then
+    echo "shutdown oracle: runtime registry still holds a runtime row" >&2
+    return 1
+  fi
+
+  run_dir="${SHUTDOWN_RUN_DIR}"
+  status_state="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("state",""))' "${run_dir}/status.json" 2>/dev/null || true)"
+  if [[ "${status_state}" != "running" ]]; then
+    echo "shutdown oracle: orphaned run status=${status_state@Q}, want running" >&2
+    return 1
+  fi
+  if [[ -f "${run_dir}/result.json" || -f "${run_dir}/summary.md" ]]; then
+    echo "shutdown oracle: orphaned run gained result.json/summary.md" >&2
+    return 1
+  fi
+  if [[ "$(task_show_field "${trace_id}" "${SHUTDOWN_TASK_ID}" status)" != "running" ]]; then
+    echo "shutdown oracle: task is not stuck in running after shutdown" >&2
+    return 1
+  fi
+
+  plans="$(replay_event_count "${SHUTDOWN_REPLAY}" INSIGHT task.plan)"
+  ready="$(replay_event_count "${SHUTDOWN_REPLAY}" SIGNAL task.ready)"
+  consumes="$(replay_event_count "${SHUTDOWN_REPLAY}" SIGNAL energy.consume)"
+  proposals="$(replay_event_count "${SHUTDOWN_REPLAY}" MUTATION code.proposal.isolated)"
+  completions="$(replay_event_count "${SHUTDOWN_REPLAY}" VERIFICATION task.completed)"
+  [[ "${plans}" == "1" ]] || { echo "shutdown oracle: task.plan count=${plans}, want 1" >&2; return 1; }
+  [[ "${ready}" == "1" ]] || { echo "shutdown oracle: task.ready count=${ready}, want 1" >&2; return 1; }
+  [[ "${consumes}" == "1" ]] || { echo "shutdown oracle: energy.consume count=${consumes}, want 1" >&2; return 1; }
+  [[ "${proposals}" == "0" ]] || { echo "shutdown oracle: isolated proposal count=${proposals}, want 0 (no runtime to publish)" >&2; return 1; }
+  [[ "${completions}" == "0" ]] || { echo "shutdown oracle: task.completed count=${completions}, want 0" >&2; return 1; }
+
+  echo "shutdown oracle: clean stop clears the registry, SIGKILL leaves it stale, no drain and no recovery"
+  return 0
+}
+
+# kill_inflight_bees terminates bee processes the runtime still considers in flight for
+# a trace. Shutdown deliberately orphans them (case 019 pins that), so the harness must
+# not leak them into the next case.
+kill_inflight_bees() {
+  local trace_id="$1"
+  local dir pid
+  while IFS= read -r dir; do
+    [[ -z "${dir}" ]] && continue
+    pid="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("pid",""))' "${dir}/status.json" 2>/dev/null || true)"
+    if [[ "${pid}" =~ ^[0-9]+$ ]] && pid_alive "${pid}"; then
+      kill -KILL "${pid}" >/dev/null 2>&1 || true
+      echo "cleanup: killed in-flight bee pid ${pid} (${dir})"
+    fi
+  done < <(find "${EVAL_ROOT}/.paseka/runs/${trace_id}" -mindepth 1 -maxdepth 1 -type d 2>/dev/null || true)
 }
 
 check_energy_exhaustion_oracle() {

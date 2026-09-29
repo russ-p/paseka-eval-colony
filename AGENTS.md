@@ -36,6 +36,7 @@ paseka init                              # idempotent
 - **Score the oracle, not task status alone** — with `review: none`, runtime may mark the task `completed` before guard→builder rework finishes; `run-case.sh` polls worktree tests.
 - **PR delivery rewrites machine-local config** — a case with `defaults.delivery: pull_request` makes `reset.sh` patch `.paseka/colony.yaml`, point home `~/.config/paseka/paseka-eval-colony/config.yaml` at `scripts/forge-fixture.sh`, and swap `origin` for `.eval/forge-origin.git`. `restore_colony_config` (reset start + `run-case.sh` exit trap) reverts all three; do not hand-edit those files while a PR case runs.
 - **Renamed worktree branches outlive purge** — `worktree.branch` cases (018) move the worktree to a case name that `paseka/eval-*` does not match, so `purge_custom_worktree_branch` drops it from `.eval/worktree-branch`; a survivor makes the next `worktree.Ensure` fail closed with `branch already exists`.
+- **Shutdown cases own the runtime** — case 019 signals `paseka run` itself (SIGTERM, SIGKILL, restart) and leaves a bee in flight on purpose; `run-case.sh` calls `kill_inflight_bees` on exit. Its task is expected to stay `running`, so `must_pass_tests` is false and no worktree oracle runs.
 - **Do not commit** `.eval/`, `reports/`, `.paseka/runs/`, `.paseka/worktrees/`, or machine-local apiary state.
 
 ## Adding a case

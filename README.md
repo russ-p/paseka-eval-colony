@@ -36,7 +36,7 @@ Tier A evals live in the Paseka platform repo (`internal/runtime` tests).
 | Case | Trace | Fault mode | Oracle |
 | ---- | ----- | ---------- | ------ |
 | `01-add-function` | `eval-01-add-function` | `scripted` | rework loop → tests pass |
-| `02-energy-exhausted` | `eval-02-energy-exhausted` | `always_broken` | energy → `blocked` |
+| `02-energy-exhausted` | `eval-02-energy-exhausted` | `always_broken` | budget 2 admits builder + guard → deferred fix-up keeps `waiting_review` → second task `blocked` |
 | `03-first-pass` | `eval-03-first-pass` | `first_pass` | no rework → tests pass |
 | `04-inject-mutation` | `eval-04-inject-mutation` | `inject-mutation` | runner signal → guard→builder |
 | `05-kill-cancel` | `eval-05-kill-cancel` | `always_broken` + kill | `cancelled`, honey remains |
@@ -57,11 +57,15 @@ Tier A evals live in the Paseka platform repo (`internal/runtime` tests).
 
 Reset model: `runner/reset.sh` purges ephemeral state (with `--reseed-energy` for task ingress; without for cue ingress), copies `cases/<id>/seed/` to repo root, commits `seedSha`, uses fixed `--trace` from `case.yaml`. Standing-trail cases run their cue twice, verify checkpoint reuse and stipend replacement, and reject an overlapping tick.
 
+## Energy exhaustion (case 02)
+
+Budget 2 admits the first task dispatch (builder) and the guard reaction. The guard fails, so the builder fix-up is a *direct* dispatch: [spec 044](https://github.com/russ-p/paseka/blob/main/docs/specs/044-energy-admission-and-pending-dispatch.md) defers it while the reserve is empty and leaves the task at `waiting_review` — the task path no longer blocks mid-trail. The case therefore adds a second task: its `task.ready` goes through task dispatch, meets the empty reserve, and must land `blocked` with `Honey reserve exhausted`. `score.expect_builder_runs: 1` proves the deferred fix-up never started.
+
 ## Worktree branch (case 18)
 
 The runtime creates `.paseka/worktrees/<traceId>/` on `paseka/<traceId>` and renames it in place when a bee emits `INSIGHT/worktree.branch` ([spec 020](https://github.com/russ-p/paseka/blob/main/docs/specs/020-worktree-branch.md)). The case pins: default name at create, rename (the default ref must disappear), `state.json` registry `branch`/`baseSha`/`path`, the `- **Branch:**` row of `paseka export`, reuse by a second task in the same trail, and a rejected `event emit` for a reserved ref.
 
-Reuse needs a real second change: the runtime publishes only each run's **attributable** diff (per-file baseline hashes), so a follow-up task that rewrites identical content produces no proposal. `cases/<id>/expect2/` holds the tree for such a follow-up dispatch. A renamed worktree branch also escapes the `paseka/eval-*` sweep in `purge_colony`, so reset drops the branch named in `.eval/worktree-branch` explicitly — otherwise `worktree.Ensure` fails closed with `branch already exists`.
+Reuse needs a real second change: the runtime publishes only each run's **attributable** diff (per-file baseline hashes), so a follow-up task that rewrites identical content produces no proposal. `cases/<id>/expect2/` holds the tree for such a follow-up dispatch. A renamed worktree branch also escapes the `paseka/eval-*` sweep in `purge_colony`, so reset drops the branch named in `.eval/worktree-branch` explicitly — otherwise `worktree.Ensure` fails closed with `branch already exists`, and the reactor redelivers the same `INSIGHT/worktree.branch` until the case times out. `delete_local_branch` detaches a leftover worktree that still holds the branch and fails loudly if the ref survives.
 
 ## Clean shutdown (case 19)
 

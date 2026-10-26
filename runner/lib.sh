@@ -140,11 +140,19 @@ elif field == "energy_budget":
 elif field == "energy_topup":
     val = nested("energy", "topup")
     print(val if val != "" else "24")
+elif field == "energy_second_task":
+    print(nested("energy", "second_task") or "")
 elif field == "score_must_pass_tests":
     val = nested("score", "must_pass_tests")
     print(val if val != "" else "true")
 elif field == "score_expect_task_status":
     print(nested("score", "expect_task_status") or "")
+elif field == "score_expect_first_task_status":
+    print(nested("score", "expect_first_task_status") or "")
+elif field == "score_expect_second_task_status":
+    print(nested("score", "expect_second_task_status") or "")
+elif field == "score_expect_builder_runs":
+    print(nested("score", "expect_builder_runs") or "")
 elif field == "score_expect_summary":
     print(nested("score", "expect_summary") or "")
 elif field == "score_expect_trace_killed":
@@ -260,6 +268,42 @@ timeout_seconds() {
   fi
 }
 
+# local_branch_worktrees lists the worktree paths that currently have <branch> checked out.
+local_branch_worktrees() {
+  local branch="$1"
+  git -C "${EVAL_ROOT}" worktree list --porcelain | awk -v want="branch refs/heads/${branch}" '
+    /^worktree / { path = substr($0, 10) }
+    $0 == want { print path }
+  '
+}
+
+# delete_local_branch force-drops a local branch, detaching a leftover colony worktree
+# that still holds it. A survivor makes worktree.Ensure fail closed with
+# `worktree: branch %q already exists`, and the reactor then redelivers the
+# INSIGHT/worktree.branch that triggered the rename forever (case 018). Fail loudly
+# instead of leaving the branch behind.
+delete_local_branch() {
+  local branch="$1"
+  local path
+  git -C "${EVAL_ROOT}" show-ref --verify --quiet "refs/heads/${branch}" || return 0
+  while IFS= read -r path; do
+    [[ -z "${path}" ]] && continue
+    if [[ "${path}" != "${EVAL_ROOT}/.paseka/worktrees/"* ]]; then
+      echo "reset: branch ${branch} is checked out at ${path}, outside ${EVAL_ROOT}/.paseka/worktrees" >&2
+      return 1
+    fi
+    echo "reset: removing leftover worktree ${path} holding ${branch}" >&2
+    git -C "${EVAL_ROOT}" worktree remove --force "${path}" >/dev/null 2>&1 || true
+  done < <(local_branch_worktrees "${branch}")
+  git -C "${EVAL_ROOT}" worktree prune >/dev/null 2>&1 || true
+  if ! git -C "${EVAL_ROOT}" branch -D -- "${branch}" >/dev/null 2>&1; then
+    echo "reset: cannot delete local branch ${branch}" >&2
+    git -C "${EVAL_ROOT}" branch -D -- "${branch}" >&2 || true
+    return 1
+  fi
+  return 0
+}
+
 purge_colony() {
   local trace_id="$1"
   local reseed="${2:-true}"
@@ -274,9 +318,15 @@ purge_colony() {
   fi
   paseka "${purge_args[@]}"
   git -C "${EVAL_ROOT}" worktree prune >/dev/null 2>&1 || true
+  # Purge is trace-scoped (spec 042), so only this trail's worktree is gone and only its
+  # default branch is ours to drop; other cases' worktrees keep their branches.
+  delete_local_branch "paseka/${trace_id}"
+  # Sweep orphaned paseka/eval-* branches (no worktree holds them). purge no longer does
+  # this globally, and a leftover branch makes a later worktree.Ensure fail closed.
   while IFS= read -r branch; do
     [[ -z "${branch}" ]] && continue
-    git -C "${EVAL_ROOT}" branch -D "${branch}" >/dev/null 2>&1 || true
+    [[ -n "$(local_branch_worktrees "${branch}")" ]] && continue
+    delete_local_branch "${branch}"
   done < <(git -C "${EVAL_ROOT}" branch --list 'paseka/eval-*' | sed 's/^[* ] //')
   # A successful head push updates refs/remotes/origin/<branch>; drop those too so a
   # recreated worktree branch pushes as a create, not a stale --force-with-lease.
@@ -364,7 +414,7 @@ purge_custom_worktree_branch() {
     return 0
   fi
   if git -C "${EVAL_ROOT}" show-ref --verify --quiet "refs/heads/${branch}"; then
-    git -C "${EVAL_ROOT}" branch -D -- "${branch}" >/dev/null 2>&1 || true
+    delete_local_branch "${branch}"
     echo "reset: dropped stale worktree branch ${branch}"
   fi
   return 0
@@ -2078,9 +2128,16 @@ check_worktree_branch_oracle() {
     echo "worktree branch oracle: default branch ${default_branch} still exists (rename expected)" >&2
     return 1
   fi
-  entries="$(git -C "${EVAL_ROOT}" worktree list --porcelain | grep -c '^worktree ' || true)"
-  if [[ "${entries}" != "2" ]]; then
-    echo "worktree branch oracle: ${entries} worktrees registered, want 2 (colony root + this trail)" >&2
+  # Purge is trace-scoped (spec 042), so worktrees from other eval cases legitimately
+  # share the git worktree list. Count only this trail's worktree and branch.
+  entries="$(git -C "${EVAL_ROOT}" worktree list --porcelain | grep -cxF "worktree ${dir}" || true)"
+  if [[ "${entries}" != "1" ]]; then
+    echo "worktree branch oracle: ${entries} worktree entries for ${trace_id}, want 1" >&2
+    return 1
+  fi
+  entries="$(git -C "${EVAL_ROOT}" worktree list --porcelain | grep -cxF "branch refs/heads/${WORKTREE_BRANCH_WANTED}" || true)"
+  if [[ "${entries}" != "1" ]]; then
+    echo "worktree branch oracle: ${entries} worktrees on ${WORKTREE_BRANCH_WANTED}, want 1" >&2
     return 1
   fi
 
@@ -2553,6 +2610,92 @@ check_energy_exhaustion_oracle() {
   fi
   if [[ -n "${expect_summary}" && "${summary}" != "${expect_summary}" ]]; then
     echo "energy oracle: summary=${summary@Q}, want ${expect_summary@Q}" >&2
+    return 1
+  fi
+  return 0
+}
+
+# run_energy_second_task drives 02's task-dispatch block after a deferred direct
+# reaction. The first task admitted its builder and guard, the guard's last honey
+# token went to the fix-up gate, and spec 044 deferred that direct dispatch without
+# changing the task status. A second task.ready then meets the empty reserve and must
+# be blocked, proving energy only blocks the task-dispatch path.
+run_energy_second_task() {
+  local case_id="$1"
+  local trace_id="$2"
+  local first_task_id="$3"
+  local timeout_secs="$4"
+  local title="$5"
+  local bee="$6"
+  local intent="$7"
+  local review="$8"
+  local body_file="$9"
+  local expect_first expect_second expect_runs start now status remaining runs
+  local first_status create_out second
+
+  expect_first="$(read_case_field "${case_id}" score_expect_first_task_status)"
+  expect_second="$(read_case_field "${case_id}" score_expect_second_task_status)"
+  expect_runs="$(read_case_field "${case_id}" score_expect_builder_runs)"
+  ENERGY_SECOND_TASK_ID=""
+  ENERGY_SECOND_TASK_STATUS=""
+
+  start=$(date +%s)
+  while true; do
+    status="$(task_show_field "${trace_id}" "${first_task_id}" status)"
+    remaining="$(energy_show_field "${trace_id}" remaining)"
+    if [[ ( -z "${expect_first}" || "${status}" == "${expect_first}" ) && "${remaining}" == "0" ]]; then
+      break
+    fi
+    now=$(date +%s)
+    if (( now - start >= timeout_secs )); then
+      echo "energy second task: first task status=${status:-missing} remaining=${remaining:-missing}, want ${expect_first:-terminal} with remaining 0 (deferred direct rework)" >&2
+      ENERGY_SECOND_TASK_STATUS="${status:-timeout}"
+      return 1
+    fi
+    sleep 1
+  done
+
+  if [[ -n "${expect_runs}" ]]; then
+    runs="$(builder_runs_count)"
+    if [[ "${runs}" != "${expect_runs}" ]]; then
+      echo "energy second task: builder-runs=${runs}, want ${expect_runs} (deferred fix-up must not start)" >&2
+      ENERGY_SECOND_TASK_STATUS="${status}"
+      return 1
+    fi
+  fi
+
+  create_out="$(paseka task create --trace "${trace_id}" --title "${title} (exhausted)" \
+    --file "${body_file}" --bee "${bee}" --intent "${intent}" --review "${review}" \
+    --autorun -C "${EVAL_ROOT}" 2>&1)" || {
+    echo "${create_out}" >&2
+    ENERGY_SECOND_TASK_STATUS="timeout"
+    return 1
+  }
+  echo "${create_out}"
+  second="$(printf '%s\n' "${create_out}" | awk '/^  task:/{print $2; exit}')"
+  if [[ -z "${second}" || "${second}" == "${first_task_id}" ]]; then
+    echo "energy second task: task id=${second@Q}" >&2
+    ENERGY_SECOND_TASK_STATUS="timeout"
+    return 1
+  fi
+  ENERGY_SECOND_TASK_ID="${second}"
+  echo "energy second task=${second}"
+
+  if [[ -n "${expect_second}" ]]; then
+    status="$(wait_for_expected_task_status "${trace_id}" "${second}" "${expect_second}" "${timeout_secs}")" || true
+  else
+    status="$(wait_for_terminal_task "${trace_id}" "${second}" "${timeout_secs}")" || true
+  fi
+  ENERGY_SECOND_TASK_STATUS="${status:-timeout}"
+  if [[ -n "${expect_second}" && "${status}" != "${expect_second}" ]]; then
+    echo "energy second task: status=${status:-timeout}, want ${expect_second}" >&2
+    return 1
+  fi
+
+  # The deferred direct reaction must not have rewritten the first task's lifecycle.
+  first_status="$(task_show_field "${trace_id}" "${first_task_id}" status)"
+  if [[ -n "${expect_first}" && "${first_status}" != "${expect_first}" ]]; then
+    echo "energy second task: first task status=${first_status:-missing}, want ${expect_first}" >&2
     return 1
   fi
   return 0

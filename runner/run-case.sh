@@ -30,6 +30,9 @@ timeout_raw="$(read_case_field "${case_id}" timeout)"
 timeout_secs="$(timeout_seconds "${timeout_raw}")"
 must_pass_tests="$(read_case_field "${case_id}" score_must_pass_tests)"
 expect_task_status="$(read_case_field "${case_id}" score_expect_task_status)"
+expect_first_task_status="$(read_case_field "${case_id}" score_expect_first_task_status)"
+expect_second_task_status="$(read_case_field "${case_id}" score_expect_second_task_status)"
+energy_second_task="$(read_case_field "${case_id}" energy_second_task)"
 kill_after="$(read_case_field "${case_id}" operator_kill_after)"
 kill_reason="$(read_case_field "${case_id}" operator_kill_reason)"
 energy_add_after_kill="$(read_case_field "${case_id}" operator_energy_add_after_kill)"
@@ -378,12 +381,26 @@ elif [[ "$(read_case_field "${case_id}" score_expect_artifact_handoff)" == "true
   task_status=""
   replay_out="$(collect_replay_lines "${trace}")"
 elif [[ "${must_pass_tests}" == "false" ]]; then
-  if [[ -n "${expect_task_status}" ]]; then
-    task_status="$(wait_for_expected_task_status "${trace}" "${task_id}" "${expect_task_status}" "${timeout_secs}")" || true
+  first_expect="${expect_first_task_status:-${expect_task_status}}"
+  if [[ -n "${first_expect}" ]]; then
+    task_status="$(wait_for_expected_task_status "${trace}" "${task_id}" "${first_expect}" "${timeout_secs}")" || true
   else
     task_status="$(wait_for_terminal_task "${trace}" "${task_id}" "${timeout_secs}")" || true
   fi
-  if check_energy_exhaustion_oracle "${case_id}" "${trace}" "${task_id}"; then
+  if [[ "${energy_second_task}" == "true" ]]; then
+    # Deferred direct reaction first (task keeps waiting_review), then a second
+    # task.ready must take the task-dispatch block path.
+    if run_energy_second_task "${case_id}" "${trace}" "${task_id}" "${timeout_secs}" \
+      "${title}" "${bee}" "${intent}" "${review}" "${task_body_file}"; then
+      task_id="${ENERGY_SECOND_TASK_ID}"
+      task_status="$(task_show_field "${trace}" "${task_id}" status)"
+      if check_energy_exhaustion_oracle "${case_id}" "${trace}" "${task_id}"; then
+        oracle_ok=true
+      fi
+    else
+      task_status="${ENERGY_SECOND_TASK_STATUS:-timeout}"
+    fi
+  elif check_energy_exhaustion_oracle "${case_id}" "${trace}" "${task_id}"; then
     oracle_ok=true
   fi
   replay_out="$(collect_replay_lines "${trace}")"

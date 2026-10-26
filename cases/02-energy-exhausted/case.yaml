@@ -13,6 +13,11 @@ fault:
 energy:
   budget: 2
   topup: 0
+  # Budget 2 admits the task dispatch and the guard reaction. The guard fails, and the
+  # builder fix-up is a direct dispatch: spec 044 defers it without touching task
+  # status, so the first task stays waiting_review. A second task.ready then meets an
+  # empty reserve and must take the task-dispatch path: blocked + summary.
+  second_task: true
 oracle:
   command: "go test ./..."
   workdir: "."
@@ -20,4 +25,7 @@ score:
   must_pass_tests: false
   expect_task_status: blocked
   expect_summary: "Honey reserve exhausted"
+  expect_first_task_status: waiting_review
+  expect_second_task_status: blocked
+  expect_builder_runs: 1
 timeout: 5m

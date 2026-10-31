@@ -265,9 +265,10 @@ elif [[ "${fault_mode}" == "pr_delivery" ]]; then
   emit_pr_body
 elif [[ "${fault_mode}" == "always_broken" ]]; then
   apply_broken
-elif [[ "${fault_mode}" == "first_pass" || "${fault_mode}" == "final_request_changes" || "${fault_mode}" == "inject-mutation" || "${fault_mode}" == "ready_before_plan" ]]; then
-  # first_pass / final_request_changes / ready_before_plan: correct on run 1. inject-mutation: builder never ran for v1;
-  # verification.failed is the first dispatch, so apply expect/ (not broken/).
+elif [[ "${fault_mode}" == "first_pass" || "${fault_mode}" == "final_request_changes" || "${fault_mode}" == "inject-mutation" || "${fault_mode}" == "ready_before_plan" || "${fault_mode}" == "closing_round" ]]; then
+  # first_pass / final_request_changes / ready_before_plan / closing_round: correct on run 1.
+  # inject-mutation: builder never ran for v1; verification.failed is the first dispatch,
+  # so apply expect/ (not broken/).
   apply_expect
   # After HITL reject, identical expect/ is a no-op — nudge a comment so the
   # runtime re-emits code.proposal.isolated for the second AFK pass.

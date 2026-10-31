@@ -9,7 +9,7 @@ Platform repo: [paseka](https://github.com/russ-p/paseka). Design spec: [docs/sp
 ```text
 .paseka/     colony config, eval-tuned bees (adapter: script)
 cases/       case.yaml + seed/, broken/, expect/ per task
-scripts/     builder.sh, guard.sh, receiver.sh, scout.sh
+scripts/     builder.sh, guard.sh, receiver.sh, scout.sh, reviewer.sh
 runner/      reset.sh, run-case.sh (Tier B harness)
 ```
 
@@ -38,6 +38,7 @@ paseka init                              # idempotent
 - **Renamed worktree branches outlive purge** — `worktree.branch` cases (018) move the worktree to a case name that `paseka/eval-*` does not match, so `purge_custom_worktree_branch` drops it from `.eval/worktree-branch`; a survivor makes the next `worktree.Ensure` fail closed with `branch already exists` and the reactor redelivers that insight forever. `delete_local_branch` detaches a leftover colony worktree still holding the ref, then deletes the branch and fails loudly if it cannot (it never touches checkouts outside `.paseka/worktrees/`).
 - **Trace-scoped purge only clears one trail** — `purge --trace` (spec 042) leaves other cases' worktrees and branches alone, so `purge_colony` deletes this trace's default branch explicitly and sweeps `paseka/eval-*` branches no worktree holds. Oracles must scope worktree/branch counts to the case trace instead of asserting a colony-wide total.
 - **Shutdown cases own the runtime** — case 019 signals `paseka run` itself (SIGTERM, SIGKILL, restart) and leaves a bee in flight on purpose; `run-case.sh` calls `kill_inflight_bees` on exit. Its task is expected to stay `running`, so `must_pass_tests` is false and no worktree oracle runs.
+- **Closing policy is a per-case patch** — a case with `closing.enabled` makes `reset.sh` append a `closing:` policy and `merge:` gate copy to `.paseka/colony.yaml` (`set_colony_closing`), reads `merge/*_file` fixtures, and writes `.eval/closing-hold-secs`; `restore_colony_config` reverts the whole file, so a leftover block would make every following trail pay for an extra closing round. `scripts/reviewer.sh` must never edit files (exactly one `code.proposal.isolated` on the trail) and completes the runtime-seeded `closing-1` through `verification.success` → receiver, never by publishing `task.completed` itself.
 - **Do not commit** `.eval/`, `reports/`, `.paseka/runs/`, `.paseka/worktrees/`, or machine-local apiary state.
 
 ## Adding a case
@@ -49,6 +50,7 @@ paseka init                              # idempotent
 5. `cases/<id>/expect2/` — optional: tree for a second dispatch in the same trail (worktree reuse). Required whenever a follow-up task must publish a proposal, because the runtime only attributes the files a run actually changed.
 6. `cases/<id>/task.body` — task text for `paseka task create --file`, or cue text for `paseka cue run` when `ingress.mode: cue`. Signal cues (`emit: signal`) create no ledger task at ingress; score on scout dispatch (`expect_scout_run`) unless the case later emits `task.plan` (set `task.id` for hive scoring).
 7. `cases/<id>/pr-body.md` — only for `defaults.delivery: pull_request`: the builder emits it as `INSIGHT pr.body` so publish resolves a body without a `--pr-body` overlay.
+8. `cases/<id>/gate-title.txt` + `gate-body.md` — only for `closing.enabled` cases: the merge-gate copy `set_colony_closing` writes into `.paseka/colony.yaml`. The body is a `text/template` over the trail inventory (`{{range .Tasks}}{{.TaskID}} {{.Phase}} {{.Status}}{{end}}`), so the oracle can assert the rendered rows.
 
 Run: `./runner/run-case.sh <id>`.
 

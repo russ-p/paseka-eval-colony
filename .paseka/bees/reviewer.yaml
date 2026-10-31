@@ -1,0 +1,21 @@
+role: reviewer
+adapter: script
+# Colony-root script so .eval knobs and uncommitted harness edits are visible.
+command: ${COLONY_ROOT}/scripts/reviewer.sh
+run_summary: disabled
+# The closing round reads the accumulated trail worktree; it never writes code.
+worktree: false
+# Script bees skip colony default templates, so the closing task needs its own
+# template to receive the trail inventory (spec 045 §9).
+prompt_template: closing.md
+subscribes:
+  - type: SIGNAL
+    kind: task.ready
+    dispatch: task
+publishes:
+  - type: INSIGHT
+    kind: pr.body
+  - type: INSIGHT
+    kind: trace.summary
+  - type: VERIFICATION
+    kind: verification.success

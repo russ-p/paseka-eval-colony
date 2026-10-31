@@ -1,0 +1,49 @@
+id: 20-closing-round
+trace: eval-20-closing-round
+seed: seed/
+ingress:
+  mode: task
+task:
+  title: "Add sum(a, b) before the closing round"
+  bee: builder
+  intent: test-fix
+  review: none
+fault:
+  mode: closing_round
+# Spec 045: the runtime seeds one closing round after the last work task and the
+# merge gate may open only once that round completes. Flat keys here (not the
+# colony schema) so runner/lib.sh can read them without a YAML parser.
+closing:
+  enabled: true
+  bee: reviewer
+  intent: closing
+  title: "Review the trail and prepare the pull request"
+  review: none
+  min_work_tasks: 1
+  max_rounds: 1
+  hold_secs: 6
+merge:
+  title_file: gate-title.txt
+  body_file: gate-body.md
+energy:
+  budget: 24
+oracle:
+  command: "go test ./pkg/..."
+  workdir: "."
+  expect_event_chain:
+    - type: INSIGHT
+      kind: task.plan
+    - type: MUTATION
+      kind: code.proposal.isolated
+    - type: VERIFICATION
+      kind: verification.success
+    - type: VERIFICATION
+      kind: task.completed
+    - type: INSIGHT
+      kind: pr.body
+    - type: VERIFICATION
+      kind: task.completed
+score:
+  must_pass_tests: true
+  expect_task_status: completed
+timeout: 10m

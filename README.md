@@ -7,15 +7,15 @@ Design: [paseka/docs/specs/003-hive-evals.md](https://github.com/russ-p/paseka/b
 ## Layout
 
 ```text
-.paseka/          colony config, eval-tuned script bees (builder, guard, receiver)
+.paseka/          colony config, eval-tuned script bees (builder, guard, receiver, reviewer)
 cases/            oracle tasks with seed/, broken/, expect/
-scripts/          script-adapter hooks for Tier B bees
+scripts/          script-adapter hooks for Tier B bees (builder, guard, receiver, scout, reviewer)
 runner/           reset + run-case harness (Tier B)
 ```
 
 ## Status
 
-Phase 2 — Tier B cases `01`–`19` (scripted loop, energy block, first-pass, inject-mutation, kill, human reject, cue hotfix, deferred emit, kill no-redispatch, signal direct, ready-before-plan, artifacts, standing trail ticks, final request-changes rework, pull-request delivery, worktree branch, clean runtime shutdown), script bees, reset + run-case runner.
+Phase 2 — Tier B cases `01`–`20` (scripted loop, energy block, first-pass, inject-mutation, kill, human reject, cue hotfix, deferred emit, kill no-redispatch, signal direct, ready-before-plan, artifacts, standing trail ticks, final request-changes rework, pull-request delivery, worktree branch, clean runtime shutdown, trail closing round), script bees, reset + run-case runner.
 
 ## Quick start
 
@@ -54,6 +54,7 @@ Tier A evals live in the Paseka platform repo (`internal/runtime` tests).
 | `17-pr-delivery` | `eval-17-pr-delivery` | `pull_request` delivery | push head + forge upsert → gate held open → host merge → reconcile, no local merge |
 | `18-worktree-branch` | `eval-18-worktree-branch` | `worktree.branch` rename | default `paseka/<trace>` → in-place rename → second task reuses the worktree, nothing pushed |
 | `19-clean-shutdown` | `eval-19-clean-shutdown` | runtime shutdown windows | SIGTERM exits clean and clears the registry · SIGKILL leaves it stale · no drain, no recovery |
+| `20-closing-round` | `eval-20-closing-round` | closing policy (045) | runtime seeds `closing-1` → gate held while it runs → gate copy rendered → approve |
 
 Reset model: `runner/reset.sh` purges ephemeral state (with `--reseed-energy` for task ingress; without for cue ingress), copies `cases/<id>/seed/` to repo root, commits `seedSha`, uses fixed `--trace` from `case.yaml`. Standing-trail cases run their cue twice, verify checkpoint reuse and stipend replacement, and reject an overlapping tick.
 
@@ -85,3 +86,12 @@ Paseka never creates a PR itself: with `defaults.delivery: pull_request` the run
 - `origin` is swapped for a local bare repo (`.eval/forge-origin.git`) for the case window, so the real head push never reaches GitHub.
 - The final gate stays `waiting_review` after publish; the runner marks the PR merged (`.eval/forge/<trace>.merged`) and `paseka run` reconcile (30 s ticker) closes the trail with `task.completed` from `agent=runtime`.
 - The deliverable is the pushed head, so the oracle clones the branch from the bare origin and runs `go test ./pkg/...` there; the colony checkout must stay on the broken seed. The leftover local head branch is removed by the next `purge`.
+
+## Closing round (case 20)
+
+[Spec 045](https://github.com/russ-p/paseka/blob/main/docs/specs/045-trail-closing-phase.md) makes the runtime own a `closing` phase between the last work task and the `merge` gate. Tier A proves the ledger and reactor logic with fakes; this case proves the hop they cannot: the runtime-published `task.plan` for `closing-1` reaches a real script bee over NATS and the gate waits for it.
+
+- `reset.sh` patches `.paseka/colony.yaml` with the policy (`closing.enabled`, `when.min_work_tasks: 1`, `bee: reviewer`, `max_rounds: 1`) and the merge-gate copy from `cases/20-closing-round/gate-*.{txt,md}`; `restore_colony_config` reverts the whole file, so no other case pays for a closing round.
+- `scripts/reviewer.sh` holds for `.eval/closing-hold-secs` seconds, emits the authoritative `INSIGHT/pr.body` + `trace.summary`, and exits through `verification.success` so the existing receiver completes `closing-1`. It never touches files: a closing round that opens a proposal would hijack review rework attribution.
+- The oracle pins: `closing-1` exists with `phase: closing` and the policy bee/title, the gate stays closed while the round is in flight, `_review` lands `phase: merge` with the templated copy (`- closing-1 closing completed` comes from the trail inventory), the closing prompt carries the inventory (`<taskId> (closing)`), exactly one proposal (the work task's), and the gate plan appears after the closing round reported.
+- Scoring uses the work task (`expect_task_status: completed`); `check_closing_round_oracle` scores the closing round and the gate, mirroring the "score the oracle, not task status alone" rule. Reset zeroes `.eval/reviewer-runs`, next to the other per-bee counters.

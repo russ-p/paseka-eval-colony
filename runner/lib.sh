@@ -101,6 +101,26 @@ elif field == "operator_review_comments_file":
     print(nested("operator", "review_comments_file") or "")
 elif field == "defaults_delivery":
     print(nested("defaults", "delivery") or "")
+elif field == "closing_enabled":
+    print(nested("closing", "enabled") or "")
+elif field == "closing_bee":
+    print(nested("closing", "bee") or "reviewer")
+elif field == "closing_intent":
+    print(nested("closing", "intent") or "closing")
+elif field == "closing_title":
+    print(nested("closing", "title") or "Review the trail")
+elif field == "closing_review":
+    print(nested("closing", "review") or "none")
+elif field == "closing_min_work_tasks":
+    print(nested("closing", "min_work_tasks") or "1")
+elif field == "closing_max_rounds":
+    print(nested("closing", "max_rounds") or "1")
+elif field == "closing_hold_secs":
+    print(nested("closing", "hold_secs") or "")
+elif field == "merge_title_file":
+    print(nested("merge", "title_file") or "")
+elif field == "merge_body_file":
+    print(nested("merge", "body_file") or "")
 elif field == "operator_pr_title":
     print(nested("operator", "pr_title") or "")
 elif field == "operator_pr_draft":
@@ -352,6 +372,7 @@ materialize_seed() {
   echo "0" > "${EVAL_META_DIR}/builder-runs"
   echo "0" > "${EVAL_META_DIR}/scout-runs"
   echo "0" > "${EVAL_META_DIR}/watcher-runs"
+  echo "0" > "${EVAL_META_DIR}/reviewer-runs"
   echo "$(read_case_field "$case_id" trace)" > "${EVAL_META_DIR}/trace"
   # Script receiver reads this to skip auto-complete for HITL review gates.
   echo "$(read_case_field "$case_id" task_review)" > "${EVAL_META_DIR}/task-review"
@@ -455,6 +476,73 @@ else:
         count=1,
         flags=re.M,
     )
+path.write_text(text)
+PY
+}
+
+# set_colony_closing patches the colony manifest with a closing policy and merge
+# gate copy for one case (spec 045). Colony.yaml is restored by
+# restore_colony_config on reset/exit, so no other case pays for a closing round.
+set_colony_closing() {
+  local case_id="$1"
+  local case_dir bee intent title review min_work_tasks max_rounds
+  local merge_title_file merge_body_file
+  case_dir="$(case_dir_for "${case_id}")"
+  bee="$(read_case_field "${case_id}" closing_bee)"
+  intent="$(read_case_field "${case_id}" closing_intent)"
+  title="$(read_case_field "${case_id}" closing_title)"
+  review="$(read_case_field "${case_id}" closing_review)"
+  min_work_tasks="$(read_case_field "${case_id}" closing_min_work_tasks)"
+  max_rounds="$(read_case_field "${case_id}" closing_max_rounds)"
+  merge_title_file="$(read_case_field "${case_id}" merge_title_file)"
+  merge_body_file="$(read_case_field "${case_id}" merge_body_file)"
+  mkdir -p "${EVAL_META_DIR}"
+  if [[ ! -f "${COLONY_CONFIG_BACKUP}" ]]; then
+    cp "${COLONY_CONFIG}" "${COLONY_CONFIG_BACKUP}"
+  fi
+  CASE_DIR="${case_dir}" BEE="${bee}" INTENT="${intent}" CLOSING_TITLE="${title}" \
+    REVIEW="${review}" MIN_WORK="${min_work_tasks}" MAX_ROUNDS="${max_rounds}" \
+    MERGE_TITLE_FILE="${merge_title_file}" MERGE_BODY_FILE="${merge_body_file}" \
+    python3 - "${COLONY_CONFIG}" <<'PY'
+import json
+import os
+import pathlib
+import re
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+if re.search(r"^closing:\s*$", text, re.M):
+    raise SystemExit("colony.yaml: closing block already present")
+
+case_dir = pathlib.Path(os.environ["CASE_DIR"])
+title_file = os.environ.get("MERGE_TITLE_FILE", "")
+body_file = os.environ.get("MERGE_BODY_FILE", "")
+merge_title = (case_dir / title_file).read_text().strip() if title_file else ""
+merge_body = (case_dir / body_file).read_text() if body_file else ""
+
+lines = [
+    "",
+    "closing:",
+    "  enabled: true",
+    "  when:",
+    f"    min_work_tasks: {int(os.environ['MIN_WORK'])}",
+    "  task:",
+    f"    bee: {os.environ['BEE']}",
+    f"    intent: {os.environ['INTENT']}",
+    f"    title: {json.dumps(os.environ['CLOSING_TITLE'])}",
+    f"    review: {os.environ['REVIEW']}",
+    f"  max_rounds: {int(os.environ['MAX_ROUNDS'])}",
+]
+if merge_title or merge_body:
+    lines += ["merge:", "  task:"]
+    if merge_title:
+        lines.append(f"    title: {json.dumps(merge_title)}")
+    if merge_body:
+        lines.append("    body: |")
+        body_lines = merge_body.splitlines() or [""]
+        lines.extend(f"      {line}" for line in body_lines)
+text = text.rstrip("\n") + "\n" + "\n".join(lines) + "\n"
 path.write_text(text)
 PY
 }
@@ -604,7 +692,7 @@ reset_case() {
   local case_id="$1"
   require_case "$case_id"
   local trace_id fault_mode energy_budget energy_topup ingress_mode delivery
-  local hold_secs kill_after watcher_hold_secs
+  local hold_secs kill_after watcher_hold_secs closing_hold
   local worktree_branch worktree_reject_branch
   trace_id="$(read_case_field "$case_id" trace)"
   fault_mode="$(read_case_field "$case_id" fault_mode)"
@@ -620,6 +708,15 @@ reset_case() {
   fi
   if [[ -n "${delivery}" ]]; then
     set_colony_delivery "${delivery}"
+  fi
+  if [[ "$(read_case_field "$case_id" closing_enabled)" == "true" ]]; then
+    set_colony_closing "$case_id"
+    closing_hold="$(read_case_field "$case_id" closing_hold_secs)"
+    closing_hold="${closing_hold:-5}"
+    mkdir -p "${EVAL_META_DIR}"
+    echo "${closing_hold}" > "${EVAL_META_DIR}/closing-hold-secs"
+  else
+    rm -f "${EVAL_META_DIR}/closing-hold-secs"
   fi
   if [[ "${fault_mode}" == "deferred_emit" || "${fault_mode}" == "deferred_artifact" ]]; then
     enable_builder_run_summary
@@ -1115,6 +1212,7 @@ task_show_field() {
   paseka task show --trace "${trace_id}" --task "${task_id}" -C "${EVAL_ROOT}" 2>/dev/null \
     | awk -v key="${field}" '
       $1 == "status:" && key == "status" { print $2; found=1 }
+      $1 == "phase:" && key == "phase" { print $2; found=1 }
       $1 == "bee:" && key == "bee" { print $2; found=1 }
       $1 == "summary:" && key == "summary" {
         sub(/^  summary:[[:space:]]*/, "")
@@ -1123,6 +1221,12 @@ task_show_field() {
       }
       END { if (!found) print "" }
     '
+}
+
+task_show_output() {
+  local trace_id="$1"
+  local task_id="$2"
+  paseka task show --trace "${trace_id}" --task "${task_id}" -C "${EVAL_ROOT}" 2>/dev/null || true
 }
 
 colony_energy_budget() {
@@ -1582,6 +1686,246 @@ check_final_request_changes_oracle() {
   [[ "${artifacts}" == "1" ]] || { echo "final request-changes oracle: artifact.written count=${artifacts}, want 1" >&2; return 1; }
   [[ "${feedback}" == "1" ]] || { echo "final request-changes oracle: human.feedback count=${feedback}, want 1" >&2; return 1; }
   echo "final request-changes oracle: rework=${rework_task} final held then approved"
+  return 0
+}
+
+# run_closing_round_flow drives 020 end to end (spec 045): one work task, then
+# the runtime-seeded `closing-1` round, then the merge gate. The point of the
+# live run is the dispatch hop Tier A cannot prove — the seeded closing task has
+# to reach a script bee over the bus — and the gate has to stay closed until the
+# round completes.
+run_closing_round_flow() {
+  local case_id="$1"
+  local trace_id="$2"
+  local task_body_file="$3"
+  local timeout_secs="$4"
+  local title="$5"
+  local bee="$6"
+  local intent="$7"
+  local review="$8"
+
+  CLOSING_ROUND_WORK_TASK_ID=""
+  CLOSING_ROUND_CLOSING_TASK_ID="closing-1"
+  CLOSING_ROUND_GATE_TASK_ID="_review"
+  CLOSING_ROUND_GATE_HELD=false
+  CLOSING_ROUND_REPLAY=""
+
+  local create_args create_out work_task approve_out
+
+  create_args=(
+    task create
+    --trace "${trace_id}"
+    --title "${title}"
+    --file "${task_body_file}"
+    --bee "${bee}"
+    --intent "${intent}"
+    --review "${review}"
+    --autorun
+    -C "${EVAL_ROOT}"
+  )
+  if ! create_out="$(paseka "${create_args[@]}" 2>&1)"; then
+    echo "${create_out}" >&2
+    CLOSING_ROUND_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  echo "${create_out}"
+  work_task="$(printf '%s\n' "${create_out}" | awk '/^  task:/{print $2; exit}')"
+  if [[ -z "${work_task}" ]]; then
+    echo "closing round oracle: work task id missing" >&2
+    CLOSING_ROUND_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  CLOSING_ROUND_WORK_TASK_ID="${work_task}"
+  echo "work task=${work_task}"
+
+  if ! wait_for_success_scoring "${case_id}" "${trace_id}" "${work_task}" completed "${timeout_secs}" >/dev/null; then
+    echo "closing round oracle: work task never completed with green tests" >&2
+    CLOSING_ROUND_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  echo "work task completed; waiting for the runtime-seeded closing round..."
+
+  # The closing round must appear without anyone planning it, carry the closing
+  # phase, and the gate must stay closed while it is in flight.
+  if ! wait_for_closing_round "${trace_id}" "${timeout_secs}"; then
+    CLOSING_ROUND_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  CLOSING_ROUND_GATE_HELD=true
+
+  # The gate opens on the completion boundary; commit the trail branch first so
+  # the local merge has a change set to deliver.
+  if ! commit_trace_worktree "${trace_id}" "eval closing round: work + closing"; then
+    echo "closing round oracle: worktree commit failed" >&2
+    CLOSING_ROUND_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+
+  if ! wait_for_expected_task_status "${trace_id}" "${CLOSING_ROUND_GATE_TASK_ID}" waiting_review "${timeout_secs}" >/dev/null; then
+    echo "closing round oracle: merge gate did not open after the closing round" >&2
+    CLOSING_ROUND_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  echo "merge gate waiting_review after closing-1 completed"
+
+  if ! approve_out="$(operator_approve_proposal "${trace_id}" "${CLOSING_ROUND_GATE_TASK_ID}" "eval: approved after the closing round" 2>&1)"; then
+    echo "${approve_out}" >&2
+    CLOSING_ROUND_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+  echo "${approve_out}"
+
+  if ! wait_for_expected_task_status "${trace_id}" "${CLOSING_ROUND_GATE_TASK_ID}" completed "${timeout_secs}" >/dev/null; then
+    echo "closing round oracle: merge gate did not complete after approval" >&2
+    CLOSING_ROUND_REPLAY="$(collect_replay_lines "${trace_id}")"
+    return 1
+  fi
+
+  CLOSING_ROUND_REPLAY="$(collect_replay_lines "${trace_id}")"
+  return 0
+}
+
+# wait_for_closing_round polls until closing-1 completes, failing fast when the
+# merge gate opens while the round is still in flight.
+wait_for_closing_round() {
+  local trace_id="$1"
+  local timeout_secs="$2"
+  local start now status phase gate_status
+  start=$(date +%s)
+  while true; do
+    status="$(task_show_field "${trace_id}" "${CLOSING_ROUND_CLOSING_TASK_ID}" status)"
+    phase="$(task_show_field "${trace_id}" "${CLOSING_ROUND_CLOSING_TASK_ID}" phase)"
+    if [[ -n "${status}" ]]; then
+      if [[ "${phase}" != "closing" ]]; then
+        echo "closing round oracle: ${CLOSING_ROUND_CLOSING_TASK_ID} phase=${phase:-missing}, want closing" >&2
+        return 1
+      fi
+      gate_status="$(task_show_field "${trace_id}" "${CLOSING_ROUND_GATE_TASK_ID}" status)"
+      if [[ "${status}" != "completed" && ( "${gate_status}" == "waiting_review" || "${gate_status}" == "completed" ) ]]; then
+        echo "closing round oracle: merge gate opened (${gate_status}) while ${CLOSING_ROUND_CLOSING_TASK_ID} was ${status}" >&2
+        return 1
+      fi
+      case "${status}" in
+        completed)
+          echo "closing round ${CLOSING_ROUND_CLOSING_TASK_ID} completed with the gate still closed"
+          return 0
+          ;;
+        failed|blocked|cancelled)
+          echo "closing round oracle: ${CLOSING_ROUND_CLOSING_TASK_ID} ended ${status}" >&2
+          return 1
+          ;;
+      esac
+    fi
+    now=$(date +%s)
+    if (( now - start >= timeout_secs )); then
+      echo "closing round oracle: ${CLOSING_ROUND_CLOSING_TASK_ID} status=${status:-missing} after ${timeout_secs}s" >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+# reviewer_prompt_for_trace echoes the prompt file of the closing run, so the
+# oracle can prove the round was dispatched with the trail inventory.
+reviewer_prompt_for_trace() {
+  local trace_id="$1"
+  local dir
+  for dir in "${EVAL_ROOT}/.paseka/runs/${trace_id}"/*/; do
+    [[ -f "${dir}meta.json" ]] || continue
+    grep -q '"bee": "reviewer"' "${dir}meta.json" 2>/dev/null || continue
+    if [[ -f "${dir}prompt.txt" ]]; then
+      echo "${dir}prompt.txt"
+      return 0
+    fi
+  done
+  return 1
+}
+
+check_closing_round_oracle() {
+  local trace_id="$1"
+  local work_task="$2"
+  local status phase gate_status gate_phase gate_show prompt_file
+  local proposals completions plans prbody
+
+  [[ "${CLOSING_ROUND_GATE_HELD}" == "true" ]] \
+    || { echo "closing round oracle: gate-closed window was not observed" >&2; return 1; }
+
+  status="$(task_show_field "${trace_id}" "${work_task}" status)"
+  [[ "${status}" == "completed" ]] || { echo "closing round oracle: work task status=${status}, want completed" >&2; return 1; }
+
+  status="$(task_show_field "${trace_id}" "${CLOSING_ROUND_CLOSING_TASK_ID}" status)"
+  phase="$(task_show_field "${trace_id}" "${CLOSING_ROUND_CLOSING_TASK_ID}" phase)"
+  [[ "${status}" == "completed" ]] || { echo "closing round oracle: closing status=${status}, want completed" >&2; return 1; }
+  [[ "${phase}" == "closing" ]] || { echo "closing round oracle: closing phase=${phase}, want closing" >&2; return 1; }
+  [[ "$(task_show_field "${trace_id}" "${CLOSING_ROUND_CLOSING_TASK_ID}" bee)" == "reviewer" ]] \
+    || { echo "closing round oracle: closing round was not run by the policy bee" >&2; return 1; }
+  task_show_output "${trace_id}" "${CLOSING_ROUND_CLOSING_TASK_ID}" | grep -q 'Review the trail and prepare the pull request' \
+    || { echo "closing round oracle: closing title does not come from the colony policy" >&2; return 1; }
+
+  gate_status="$(task_show_field "${trace_id}" "${CLOSING_ROUND_GATE_TASK_ID}" status)"
+  gate_phase="$(task_show_field "${trace_id}" "${CLOSING_ROUND_GATE_TASK_ID}" phase)"
+  [[ "${gate_status}" == "completed" ]] || { echo "closing round oracle: gate status=${gate_status}, want completed" >&2; return 1; }
+  [[ "${gate_phase}" == "merge" ]] || { echo "closing round oracle: gate phase=${gate_phase}, want merge" >&2; return 1; }
+
+  gate_show="$(task_show_output "${trace_id}" "${CLOSING_ROUND_GATE_TASK_ID}")"
+  printf '%s\n' "${gate_show}" | grep -q 'Eval closing gate' \
+    || { echo "closing round oracle: gate title copy missing" >&2; return 1; }
+  printf '%s\n' "${gate_show}" | grep -q 'eval gate copy' \
+    || { echo "closing round oracle: gate body copy missing" >&2; return 1; }
+  printf '%s\n' "${gate_show}" | grep -q -- "- ${CLOSING_ROUND_CLOSING_TASK_ID} closing completed" \
+    || { echo "closing round oracle: gate copy does not list the closing round from the trail inventory" >&2; return 1; }
+  printf '%s\n' "${gate_show}" | grep -q -- "- ${work_task} work completed" \
+    || { echo "closing round oracle: gate copy does not list the work task from the trail inventory" >&2; return 1; }
+
+  if ! prompt_file="$(reviewer_prompt_for_trace "${trace_id}")"; then
+    echo "closing round oracle: no reviewer run recorded for the closing round" >&2
+    return 1
+  fi
+  grep -q "${work_task}" "${prompt_file}" \
+    || { echo "closing round oracle: closing prompt is missing the trail inventory (${prompt_file})" >&2; return 1; }
+  grep -q "${CLOSING_ROUND_CLOSING_TASK_ID} (closing)" "${prompt_file}" \
+    || { echo "closing round oracle: closing prompt does not carry the closing phase" >&2; return 1; }
+
+  if ! CLOSING_ROUND_REPLAY="${CLOSING_ROUND_REPLAY}" python3 - <<'PY'
+import os
+import re
+import sys
+
+lines = [line for line in os.environ["CLOSING_ROUND_REPLAY"].splitlines() if re.match(r"^\s*\d+\.", line)]
+prbody = -1
+gate_plan = -1
+for i, line in enumerate(lines):
+    if "INSIGHT (pr.body)" in line:
+        prbody = i
+    if "INSIGHT (task.plan) agent=runtime" in line:
+        gate_plan = i
+if prbody < 0:
+    print("closing round oracle: no pr.body on the trail", file=sys.stderr)
+    sys.exit(1)
+if gate_plan < 0:
+    print("closing round oracle: merge gate was never planned", file=sys.stderr)
+    sys.exit(1)
+if gate_plan < prbody:
+    print("closing round oracle: merge gate was planned before the closing round reported", file=sys.stderr)
+    sys.exit(1)
+PY
+  then
+    return 1
+  fi
+
+  proposals="$(replay_event_count "${CLOSING_ROUND_REPLAY}" MUTATION code.proposal.isolated)"
+  [[ "${proposals}" == "1" ]] \
+    || { echo "closing round oracle: isolated proposal count=${proposals}, want 1 (the closing round must not edit code)" >&2; return 1; }
+  plans="$(replay_event_count "${CLOSING_ROUND_REPLAY}" INSIGHT task.plan)"
+  [[ "${plans}" == "3" ]] \
+    || { echo "closing round oracle: task.plan count=${plans}, want 3 (work + closing + gate)" >&2; return 1; }
+  prbody="$(replay_event_count "${CLOSING_ROUND_REPLAY}" INSIGHT pr.body)"
+  [[ "${prbody}" == "1" ]] || { echo "closing round oracle: pr.body count=${prbody}, want 1" >&2; return 1; }
+  completions="$(replay_event_count "${CLOSING_ROUND_REPLAY}" VERIFICATION task.completed)"
+  [[ "${completions}" == "3" ]] \
+    || { echo "closing round oracle: task.completed count=${completions}, want 3 (work + closing + gate)" >&2; return 1; }
+
+  echo "closing round oracle: seeded closing-1, gate held, gate copy rendered, approved"
   return 0
 }
 

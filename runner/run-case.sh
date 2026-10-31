@@ -104,6 +104,7 @@ shutdown_flow_done=false
 worktree_flow_done=false
 pr_flow_done=false
 final_flow_done=false
+closing_flow_done=false
 standing_flow_done=false
 if [[ "${fault_mode}" == "clean_shutdown" ]]; then
   if run_clean_shutdown_flow "${case_id}" "${trace}" "${task_body_file}" "${timeout_secs}" \
@@ -164,6 +165,22 @@ elif [[ "${fault_mode}" == "pr_delivery" ]]; then
     replay_out="${PR_DELIVERY_REPLAY:-$(collect_replay_lines "${trace}")}"
   fi
   pr_flow_done=true
+elif [[ "${fault_mode}" == "closing_round" ]]; then
+  if run_closing_round_flow "${case_id}" "${trace}" "${task_body_file}" "${timeout_secs}" \
+    "${title}" "${bee}" "${intent}" "${review}"; then
+    task_id="${CLOSING_ROUND_WORK_TASK_ID}"
+    task_status="$(task_show_field "${trace}" "${task_id}" status)"
+    replay_out="${CLOSING_ROUND_REPLAY}"
+    if check_closing_round_oracle "${trace}" "${CLOSING_ROUND_WORK_TASK_ID}" && \
+      run_oracle "${case_id}" "${trace}"; then
+      oracle_ok=true
+    fi
+  else
+    task_id="${CLOSING_ROUND_WORK_TASK_ID:-}"
+    task_status="timeout"
+    replay_out="${CLOSING_ROUND_REPLAY:-$(collect_replay_lines "${trace}")}"
+  fi
+  closing_flow_done=true
 elif [[ "${fault_mode}" == "final_request_changes" ]]; then
   if [[ -z "${review_comments_rel}" ]]; then
     echo "case ${case_id}: operator.review_comments_file missing in case.yaml" >&2
@@ -278,6 +295,8 @@ elif [[ "${worktree_flow_done}" == "true" ]]; then
 elif [[ "${pr_flow_done}" == "true" ]]; then
   :
 elif [[ "${final_flow_done}" == "true" ]]; then
+  :
+elif [[ "${closing_flow_done}" == "true" ]]; then
   :
 elif [[ "${standing_flow_done}" == "true" ]]; then
   :
